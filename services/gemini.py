@@ -10,6 +10,8 @@ from google import genai
 from google.genai import types
 from django.conf import settings
 
+from services.token_tracker import tracker
+
 logger = logging.getLogger("services")
 
 client = genai.Client(api_key=settings.GEMINI_API_KEY)
@@ -134,6 +136,14 @@ async def _call(contents, config: types.GenerateContentConfig) -> str:
             )
             if model_name != MODEL:
                 logger.info("Fallback model ishlatildi: %s", model_name)
+            meta = getattr(response, "usage_metadata", None)
+            if meta:
+                tracker.record(
+                    prompt_tokens=getattr(meta, "prompt_token_count", 0) or 0,
+                    response_tokens=getattr(meta, "candidates_token_count", 0) or 0,
+                    total_tokens=getattr(meta, "total_token_count", 0) or 0,
+                    model=model_name,
+                )
             return response.text
         except Exception as e:
             if _is_quota_error(e):

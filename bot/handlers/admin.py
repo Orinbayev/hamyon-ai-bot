@@ -35,6 +35,7 @@ from django.db.models.functions import Coalesce
 from apps.transactions.models import Transaction
 from apps.users.models import TelegramUser
 from services import export as export_service
+from services.token_tracker import tracker as gemini_tracker
 
 logger = logging.getLogger("bot.admin")
 router = Router(name="admin")
@@ -66,6 +67,7 @@ def _main_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📢 Xabar yuborish", callback_data="adm:broadcast"),
         InlineKeyboardButton(text="ℹ️ Bot haqida", callback_data="adm:about"),
     )
+    b.row(InlineKeyboardButton(text="🤖 Gemini tokenlar", callback_data="adm:gemini"))
     return b.as_markup()
 
 
@@ -513,3 +515,46 @@ def _fetch_about() -> str:
         f"🏆 <b>TOP-3 faol foydalanuvchi:</b>\n"
         + "\n".join(top_lines)
     )
+
+
+# ── 🤖 Gemini token stats ──────────────────────────────────────────────────────
+
+def _pct_bar(pct: float, width: int = 12) -> str:
+    filled = round(pct / 100 * width)
+    return "▓" * filled + "░" * (width - filled)
+
+
+@router.callback_query(F.data == "adm:gemini")
+async def adm_gemini(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        return
+
+    s = gemini_tracker.stats()
+    sess_req = gemini_tracker.session_requests
+    sess_tok = gemini_tracker.session_tokens
+
+    warn_req = " ⚠️" if s.req_pct >= 80 else ""
+    warn_tok = " ⚠️" if s.tok_pct >= 80 else ""
+
+    text = (
+        f"🤖 <b>Gemini token holati</b>\n{SEP}\n\n"
+        f"📅 Sana:   <b>{s.day}</b>\n"
+        f"🔧 Model:  <code>{s.model or 'gemini-2.5-flash'}</code>\n\n"
+        f"{SEP}\n\n"
+        f"<b>📨 So'rovlar (bugun):</b>{warn_req}\n"
+        f"  Ishlatildi:  <b>{s.requests}</b> / 500\n"
+        f"  Qoldi:       <b>{s.req_remaining}</b>\n"
+        f"  <code>{_pct_bar(s.req_pct)}</code>  {s.req_pct:.1f}%\n\n"
+        f"<b>🔤 Tokenlar (bugun):</b>{warn_tok}\n"
+        f"  Prompt:      <b>{s.prompt_tokens:,}</b>\n"
+        f"  Javob:       <b>{s.response_tokens:,}</b>\n"
+        f"  Jami:        <b>{s.total_tokens:,}</b> / 1 000 000\n"
+        f"  Qoldi:       <b>{s.tok_remaining:,}</b>\n"
+        f"  <code>{_pct_bar(s.tok_pct)}</code>  {s.tok_pct:.1f}%\n\n"
+        f"{SEP}\n\n"
+        f"<b>⚡ Joriy sessiya:</b>\n"
+        f"  So'rovlar: <b>{sess_req}</b>\n"
+        f"  Tokenlar:  <b>{sess_tok:,}</b>"
+    )
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_back_kb("adm:menu"))
+    await callback.answer()
