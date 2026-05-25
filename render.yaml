@@ -1,0 +1,90 @@
+## ─────────────────────────────────────────────────────────────────────────────
+## Render Blueprint — HamyonAI Bot
+##
+## Ikki servis (bitta repo):
+##   hamyon-web  — Django admin panel  (https://hamyon-web.onrender.com/admin/)
+##   hamyon-bot  — Telegram bot polling (background worker, 24/7)
+##
+## Foydalanish:
+##   1. GitHub ga push qiling
+##   2. Render → New → Blueprint → repo ni tanlang
+##   3. Dashboard da quyidagi ENV o'zgaruvchilarni to'ldiring:
+##        TELEGRAM_BOT_TOKEN  — botning token (BotFather dan)
+##        GEMINI_API_KEY      — Google AI Studio dan
+##        ADMIN_IDS           — sizning Telegram ID (masalan: 6678521239)
+##        DEBUG               — False (production uchun)
+## ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Django Admin (Web) ────────────────────────────────────────────────────
+  - type: web
+    name: hamyon-web
+    runtime: python
+    region: frankfurt
+    plan: free
+    buildCommand: "./build.sh"
+    startCommand: "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 120"
+    healthCheckPath: /admin/login/
+    envVars:
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hamyon-db
+          property: connectionString
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: ADMIN_IDS
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+
+  # ── Telegram Bot (Worker) ─────────────────────────────────────────────────
+  - type: worker
+    name: hamyon-bot
+    runtime: python
+    region: frankfurt
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python manage.py runbot"
+    envVars:
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings
+      - key: SECRET_KEY
+        fromService:
+          name: hamyon-web
+          type: web
+          envVarKey: SECRET_KEY
+      - key: DEBUG
+        value: "False"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hamyon-db
+          property: connectionString
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: ADMIN_IDS
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+databases:
+  - name: hamyon-db
+    databaseName: hamyon_bot
+    user: hamyon_user
+    region: frankfurt
+    plan: free

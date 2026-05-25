@@ -1,0 +1,17 @@
+[
+  {"model": "transactions.category", "pk": 1,  "fields": {"name": "Ovqat",        "slug": "ovqat",        "icon": "🍽", "type": "expense", "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 2,  "fields": {"name": "Taxi",         "slug": "taxi",         "icon": "🚕", "type": "expense", "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 3,  "fields": {"name": "Transport",    "slug": "transport",    "icon": "🚌", "type": "expense", "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 4,  "fields": {"name": "Kiyim",        "slug": "kiyim",        "icon": "👗", "type": "expense", "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 5,  "fields": {"name": "Internet",     "slug": "internet",     "icon": "🌐", "type": "expense", "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 6,  "fields": {"name": "Telefon",      "slug": "telefon",      "icon": "📱", "type": "expense", "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 7,  "fields": {"name": "Uy",           "slug": "uy",           "icon": "🏠", "type": "expense", "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 8,  "fields": {"name": "Kommunal",     "slug": "kommunal",     "icon": "💡", "type": "expense", "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 9,  "fields": {"name": "O'qish",       "slug": "oqish",        "icon": "📚", "type": "expense", "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 10, "fields": {"name": "Salomatlik",   "slug": "salomatlik",   "icon": "💊", "type": "expense", "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 11, "fields": {"name": "Ko'ngilochar", "slug": "kongilochar",  "icon": "🎭", "type": "expense", "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 12, "fields": {"name": "Ish haqi",     "slug": "ish_haqi",     "icon": "💼", "type": "income",  "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 13, "fields": {"name": "Qarz",         "slug": "qarz",         "icon": "🤝", "type": "both",    "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 14, "fields": {"name": "Sovg'a",       "slug": "sovga",        "icon": "🎁", "type": "both",    "is_default": true, "user": null}},
+  {"model": "transactions.category", "pk": 15, "fields": {"name": "Boshqa",       "slug": "boshqa",       "icon": "📌", "type": "both",    "is_default": true, "user": null}}
+]
