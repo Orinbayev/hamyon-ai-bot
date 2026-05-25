@@ -712,3 +712,4 @@ async def adm_gemini(callback: CallbackQuery) -> None:
     b.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="adm:menu"))
     await _safe_edit(callback, text, parse_mode="HTML", reply_markup=b.as_markup())
     await callback.answer()
+#TEST uchun yozyapman!
