@@ -1,14 +1,23 @@
 """
-Admin panel handler.
-Faqat settings.ADMIN_IDS ro'yxatidagi Telegram ID larga ruxsat beriladi.
+Admin panel handler — faqat settings.ADMIN_IDS uchun.
 
-Features:
-  📊 Umumiy statistika — barcha foydalanuvchilar bo'yicha yig'ilgan ma'lumot
-  👥 Foydalanuvchilar  — sahifalangan ro'yxat, har birini bosib detail ko'rish
-  👤 User detail       — statistika, oxirgi 5 tranzaksiya, excel eksport, tozalash
-  📢 Xabar yuborish    — barcha faol foydalanuvchilarga broadcast
-  ℹ️ Bot haqida        — bugungi/haftalik o'sish, TOP-3 faol
-  /whoami              — o'z Telegram ID ni ko'rish (admin qo'shish uchun)
+Buyruqlar:
+  /admin   — panel ochish
+  /whoami  — o'z Telegram ID ni bilish
+
+Callback patterns:
+  adm:menu           — bosh menyu
+  adm:stats          — umumiy statistika
+  adm:today          — bugungi ko'rsat
+  adm:users:{page}   — foydalanuvchilar ro'yxati
+  adm:user:{id}      — user detail
+  adm:export:{id}    — user Excel
+  adm:clear:{id}     — tozalash tasdiqlash
+  adm:clear_ok:{id}  — tozalashni tasdiqlash
+  adm:broadcast      — xabar yuborish
+  adm:broadcast_ok   — yuborishni tasdiqlash
+  adm:about          — bot haqida
+  adm:gemini         — Gemini token holati
 """
 
 import asyncio
@@ -16,6 +25,7 @@ import logging
 from datetime import date, timedelta
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -40,8 +50,8 @@ from services.token_tracker import tracker as gemini_tracker
 logger = logging.getLogger("bot.admin")
 router = Router(name="admin")
 
-SEP = "━" * 15
-USERS_PER_PAGE = 8
+SEP = "━" * 16
+USERS_PER_PAGE = 10
 
 
 class AdminState(StatesGroup):
@@ -49,10 +59,39 @@ class AdminState(StatesGroup):
     confirm_broadcast = State()
 
 
-# ── Access helpers ─────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _is_admin(tg_id: int) -> bool:
     return tg_id in getattr(settings, "ADMIN_IDS", [])
+
+
+def _fname(full_name: str) -> str:
+    parts = (full_name or "").split()
+    return parts[0] if parts else "Admin"
+
+
+def _fmt(v: float) -> str:
+    return f"{v:,.0f}".replace(",", " ") + " so'm"
+
+
+def _fmts(v: float) -> str:
+    sign = "+" if v >= 0 else "–"
+    return f"{sign}{abs(v):,.0f}".replace(",", " ") + " so'm"
+
+
+def _pct_bar(pct: float, width: int = 10) -> str:
+    filled = min(round(pct / 100 * width), width)
+    return "▓" * filled + "░" * (width - filled)
+
+
+async def _safe_edit(callback: CallbackQuery, text: str, **kwargs) -> None:
+    try:
+        if callback.message.text:
+            await callback.message.edit_text(text, **kwargs)
+        else:
+            await callback.message.edit_caption(caption=text, **kwargs)
+    except TelegramBadRequest:
+        await callback.message.answer(text, **kwargs)
 
 
 # ── Keyboards ──────────────────────────────────────────────────────────────────
@@ -61,13 +100,16 @@ def _main_kb() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.row(
         InlineKeyboardButton(text="📊 Statistika", callback_data="adm:stats"),
+        InlineKeyboardButton(text="📅 Bugun", callback_data="adm:today"),
+    )
+    b.row(
         InlineKeyboardButton(text="👥 Foydalanuvchilar", callback_data="adm:users:0"),
+        InlineKeyboardButton(text="ℹ️ Bot haqida", callback_data="adm:about"),
     )
     b.row(
         InlineKeyboardButton(text="📢 Xabar yuborish", callback_data="adm:broadcast"),
-        InlineKeyboardButton(text="ℹ️ Bot haqida", callback_data="adm:about"),
+        InlineKeyboardButton(text="🤖 Gemini", callback_data="adm:gemini"),
     )
-    b.row(InlineKeyboardButton(text="🤖 Gemini tokenlar", callback_data="adm:gemini"))
     return b.as_markup()
 
 
@@ -77,28 +119,29 @@ def _back_kb(target: str = "adm:menu") -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-# ── /whoami — o'z ID ni bilish ─────────────────────────────────────────────────
+# ── /whoami ────────────────────────────────────────────────────────────────────
 
 @router.message(Command("whoami"))
 async def cmd_whoami(message: Message) -> None:
     await message.answer(
         f"🆔 Sizning Telegram ID: <code>{message.from_user.id}</code>\n\n"
-        f"Admin qo'shish uchun bu raqamni <code>.env</code> faylidagi\n"
-        f"<code>ADMIN_IDS=</code> qatoriga yozing.",
+        "Admin qo'shish uchun bu ID ni <code>ADMIN_IDS</code> env ga yozing.",
         parse_mode="HTML",
     )
 
 
-# ── /admin command ─────────────────────────────────────────────────────────────
+# ── /admin ─────────────────────────────────────────────────────────────────────
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, db_user: TelegramUser, state: FSMContext) -> None:
-    await state.clear()
     if not _is_admin(message.from_user.id):
         return
-    name = db_user.full_name.split()[0]
+    await state.clear()
+    name = _fname(db_user.full_name)
     await message.answer(
-        f"🛠 <b>Admin panel</b>\n{SEP}\nXush kelibsiz, <b>{name}</b>!\n\nBo'limni tanlang:",
+        f"🛠 <b>Admin panel</b>\n{SEP}\n"
+        f"Xush kelibsiz, <b>{name}</b>!\n\n"
+        "Bo'limni tanlang:",
         parse_mode="HTML",
         reply_markup=_main_kb(),
     )
@@ -109,7 +152,8 @@ async def adm_menu(callback: CallbackQuery, state: FSMContext) -> None:
     if not _is_admin(callback.from_user.id):
         return
     await state.clear()
-    await callback.message.edit_text(
+    await _safe_edit(
+        callback,
         f"🛠 <b>Admin panel</b>\n{SEP}\nBo'limni tanlang:",
         parse_mode="HTML",
         reply_markup=_main_kb(),
@@ -117,7 +161,7 @@ async def adm_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-# ── 📊 Stats ───────────────────────────────────────────────────────────────────
+# ── 📊 Umumiy statistika ───────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "adm:stats")
 async def adm_stats(callback: CallbackQuery) -> None:
@@ -133,8 +177,10 @@ async def adm_stats(callback: CallbackQuery) -> None:
 def _fetch_stats() -> str:
     today = date.today()
     week_ago = today - timedelta(days=7)
+    month_ago = today.replace(day=1)
 
     total_users = TelegramUser.objects.count()
+    new_today = TelegramUser.objects.filter(created_at__date=today).count()
     active_today = (
         Transaction.objects.filter(transaction_date=today)
         .values("user_id").distinct().count()
@@ -143,7 +189,11 @@ def _fetch_stats() -> str:
         Transaction.objects.filter(transaction_date__gte=week_ago)
         .values("user_id").distinct().count()
     )
+
     total_tx = Transaction.objects.count()
+    tx_today = Transaction.objects.filter(transaction_date=today).count()
+    tx_week = Transaction.objects.filter(transaction_date__gte=week_ago).count()
+    tx_month = Transaction.objects.filter(transaction_date__gte=month_ago).count()
 
     agg = Transaction.objects.aggregate(
         income=Coalesce(
@@ -153,31 +203,96 @@ def _fetch_stats() -> str:
             Sum("amount", filter=Q(type="expense")), Value(0), output_field=DecimalField()
         ),
     )
+    agg_today = Transaction.objects.filter(transaction_date=today).aggregate(
+        income=Coalesce(
+            Sum("amount", filter=Q(type="income")), Value(0), output_field=DecimalField()
+        ),
+        expense=Coalesce(
+            Sum("amount", filter=Q(type="expense")), Value(0), output_field=DecimalField()
+        ),
+    )
+
     income = float(agg["income"])
     expense = float(agg["expense"])
-    balance = income - expense
-
-    def fu(v):
-        return f"{v:,.0f}".replace(",", " ") + " so'm"
-
-    def fs(v):
-        s = "+" if v >= 0 else "–"
-        return f"{s}{abs(v):,.0f}".replace(",", " ") + " so'm"
+    income_t = float(agg_today["income"])
+    expense_t = float(agg_today["expense"])
 
     return (
         f"📊 <b>Umumiy statistika</b>\n{SEP}\n\n"
-        f"👥 Jami foydalanuvchilar:   <b>{total_users}</b>\n"
-        f"🟢 Faol (bu hafta):          <b>{active_week}</b>\n"
-        f"🟡 Faol (bugun):             <b>{active_today}</b>\n\n"
+        f"👥 <b>Foydalanuvchilar:</b>\n"
+        f"   Jami:         <b>{total_users}</b>\n"
+        f"   Bugun yangi:  <b>{new_today}</b>\n"
+        f"   Faol (bugun): <b>{active_today}</b>\n"
+        f"   Faol (hafta): <b>{active_week}</b>\n\n"
         f"{SEP}\n\n"
-        f"📋 Jami tranzaksiyalar:     <b>{total_tx}</b>\n"
-        f"💰 Jami kirim:              <b>{fu(income)}</b>\n"
-        f"💸 Jami chiqim:             <b>{fu(expense)}</b>\n"
-        f"📈 Umumiy balans:           <b>{fs(balance)}</b>"
+        f"📋 <b>Tranzaksiyalar:</b>\n"
+        f"   Jami:   <b>{total_tx}</b>\n"
+        f"   Bugun:  <b>{tx_today}</b>\n"
+        f"   Hafta:  <b>{tx_week}</b>\n"
+        f"   Oy:     <b>{tx_month}</b>\n\n"
+        f"{SEP}\n\n"
+        f"💰 <b>Moliyaviy (jami):</b>\n"
+        f"   Kirim:   <b>{_fmt(income)}</b>\n"
+        f"   Chiqim:  <b>{_fmt(expense)}</b>\n"
+        f"   Balans:  <b>{_fmts(income - expense)}</b>\n\n"
+        f"💰 <b>Bugun:</b>\n"
+        f"   Kirim:   <b>{_fmt(income_t)}</b>\n"
+        f"   Chiqim:  <b>{_fmt(expense_t)}</b>"
     )
 
 
-# ── 👥 User list ───────────────────────────────────────────────────────────────
+# ── 📅 Bugungi faollik ─────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "adm:today")
+async def adm_today(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        return
+    await callback.message.edit_text("⏳...")
+    text = await _fetch_today()
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_back_kb())
+    await callback.answer()
+
+
+@sync_to_async
+def _fetch_today() -> str:
+    today = date.today()
+    txs = list(
+        Transaction.objects.filter(transaction_date=today)
+        .select_related("user", "category")
+        .order_by("-created_at")[:20]
+    )
+    total = Transaction.objects.filter(transaction_date=today).count()
+    agg = Transaction.objects.filter(transaction_date=today).aggregate(
+        income=Coalesce(
+            Sum("amount", filter=Q(type="income")), Value(0), output_field=DecimalField()
+        ),
+        expense=Coalesce(
+            Sum("amount", filter=Q(type="expense")), Value(0), output_field=DecimalField()
+        ),
+    )
+
+    lines = [
+        f"📅 <b>Bugun — {today.strftime('%d.%m.%Y')}</b>\n{SEP}\n",
+        f"📋 Jami tranzaksiya: <b>{total}</b>",
+        f"💰 Kirim:  <b>{_fmt(float(agg['income']))}</b>",
+        f"💸 Chiqim: <b>{_fmt(float(agg['expense']))}</b>",
+        "",
+    ]
+    if txs:
+        lines.append(f"<b>Oxirgi {min(len(txs), 20)} ta:</b>")
+        for t in txs:
+            icon = "💰" if t.type == "income" else "💸"
+            cat = t.category.name if t.category else "Boshqa"
+            amt = f"{float(t.amount):,.0f}".replace(",", " ")
+            name = (t.user.full_name or "?")[:16]
+            lines.append(f"{icon} {name} — {cat} {amt} {t.currency}")
+    else:
+        lines.append("🔕 Bugun hech qanday tranzaksiya yo'q.")
+
+    return "\n".join(lines)
+
+
+# ── 👥 Foydalanuvchilar ro'yxati ───────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("adm:users:"))
 async def adm_users(callback: CallbackQuery) -> None:
@@ -185,7 +300,7 @@ async def adm_users(callback: CallbackQuery) -> None:
         return
     page = int(callback.data.split(":")[2])
     text, kb = await _fetch_users_page(page)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await _safe_edit(callback, text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 
@@ -193,6 +308,7 @@ async def adm_users(callback: CallbackQuery) -> None:
 def _fetch_users_page(page: int) -> tuple[str, InlineKeyboardMarkup]:
     total = TelegramUser.objects.count()
     offset = page * USERS_PER_PAGE
+    total_pages = max(1, (total + USERS_PER_PAGE - 1) // USERS_PER_PAGE)
 
     users = list(
         TelegramUser.objects
@@ -203,34 +319,39 @@ def _fetch_users_page(page: int) -> tuple[str, InlineKeyboardMarkup]:
                 Value(0), output_field=DecimalField(),
             ),
         )
-        .order_by("-_tx")[offset:offset + USERS_PER_PAGE]
+        .order_by("-_tx")[offset : offset + USERS_PER_PAGE]
     )
 
+    current_page = page + 1
+    lines = [
+        f"👥 <b>Foydalanuvchilar</b>  "
+        f"<b>{current_page}/{total_pages}</b>  ({total} ta)\n{SEP}\n"
+    ]
     start_n = offset + 1
-    end_n = min(offset + USERS_PER_PAGE, total)
-    lines = [f"👥 <b>Foydalanuvchilar</b>  {start_n}–{end_n} / {total}\n{SEP}\n"]
     for i, u in enumerate(users, start_n):
         uname = f"@{u.username}" if u.username else "—"
         exp_str = f"{float(u._exp):,.0f}".replace(",", " ")
+        status = "🟢" if u.is_active else "🔴"
         lines.append(
-            f"{i}. <b>{u.full_name}</b>  {uname}\n"
-            f"   📋 {u._tx} ta  •  💸 {exp_str} so'm\n"
+            f"{status} <b>{i}.</b> {u.full_name[:20]}  {uname}\n"
+            f"    📋 {u._tx}  •  💸 {exp_str} so'm\n"
         )
 
     b = InlineKeyboardBuilder()
     for u in users:
-        b.row(InlineKeyboardButton(
-            text=f"👤 {u.full_name[:28]}",
-            callback_data=f"adm:user:{u.id}",
-        ))
+        label = f"{'🟢' if u.is_active else '🔴'} {u.full_name[:28]}"
+        b.row(InlineKeyboardButton(text=label, callback_data=f"adm:user:{u.id}"))
 
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️ Oldingi", callback_data=f"adm:users:{page - 1}"))
-    if end_n < total:
-        nav.append(InlineKeyboardButton(text="Keyingi ▶️", callback_data=f"adm:users:{page + 1}"))
-    if nav:
-        b.row(*nav)
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm:users:{page - 1}"))
+    nav.append(InlineKeyboardButton(
+        text=f"📄 {current_page}/{total_pages}",
+        callback_data="adm:menu",
+    ))
+    if offset + USERS_PER_PAGE < total:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm:users:{page + 1}"))
+    b.row(*nav)
     b.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="adm:menu"))
 
     return "\n".join(lines), b.as_markup()
@@ -238,13 +359,13 @@ def _fetch_users_page(page: int) -> tuple[str, InlineKeyboardMarkup]:
 
 # ── 👤 User detail ─────────────────────────────────────────────────────────────
 
-@router.callback_query(F.data.startswith("adm:user:"))
+@router.callback_query(F.data.regexp(r"^adm:user:\d+$"))
 async def adm_user_detail(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         return
     user_id = int(callback.data.split(":")[2])
     text, kb = await _fetch_user_detail(user_id)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await _safe_edit(callback, text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 
@@ -268,97 +389,119 @@ def _fetch_user_detail(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     )
     income = float(agg["income"])
     expense = float(agg["expense"])
-    balance = income - expense
 
     last_txs = list(
         Transaction.objects.filter(user=u)
         .select_related("category")
-        .order_by("-transaction_date", "-created_at")[:5]
+        .order_by("-transaction_date", "-created_at")[:8]
     )
 
     uname = f"@{u.username}" if u.username else "—"
-
-    def fu(v):
-        return f"{v:,.0f}".replace(",", " ") + " so'm"
-
-    def fs(v):
-        s = "+" if v >= 0 else "–"
-        return f"{s}{abs(v):,.0f}".replace(",", " ") + " so'm"
+    status_txt = "Faol ✅" if u.is_active else "Bloklangan 🔴"
 
     lines = [
         f"👤 <b>{u.full_name}</b>  {uname}\n{SEP}\n",
-        f"🆔 Telegram ID:    <code>{u.telegram_id}</code>",
-        f"📅 Ro'yxatdan:     {u.created_at.strftime('%d.%m.%Y')}",
-        f"🟢 Holat:          {'Faol ✅' if u.is_active else 'Nofaol ❌'}\n",
-        f"📋 Tranzaksiyalar: <b>{agg['total']}</b>",
-        f"💰 Kirim:          <b>{fu(income)}</b>",
-        f"💸 Chiqim:         <b>{fu(expense)}</b>",
-        f"📈 Balans:         <b>{fs(balance)}</b>",
+        f"🆔 Telegram ID:     <code>{u.telegram_id}</code>",
+        f"📅 Ro'yxatdan:      {u.created_at.strftime('%d.%m.%Y %H:%M')}",
+        f"🔄 Yangilangan:     {u.updated_at.strftime('%d.%m.%Y %H:%M')}",
+        f"🟢 Holat:           {status_txt}\n",
+        f"📋 Tranzaksiyalar:  <b>{agg['total']}</b>",
+        f"💰 Kirim:           <b>{_fmt(income)}</b>",
+        f"💸 Chiqim:          <b>{_fmt(expense)}</b>",
+        f"📈 Balans:          <b>{_fmts(income - expense)}</b>",
     ]
 
     if last_txs:
-        lines.append(f"\n{SEP}\n🕐 Oxirgi {len(last_txs)} ta:\n")
-        nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+        lines.append(f"\n{SEP}\n🕐 <b>Oxirgi {len(last_txs)} ta tranzaksiya:</b>\n")
+        nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
         for i, t in enumerate(last_txs):
             icon = "💰" if t.type == "income" else "💸"
             cat = t.category.name if t.category else "Boshqa"
             amt = f"{float(t.amount):,.0f}".replace(",", " ")
             lines.append(
                 f"{nums[i]} {icon} {cat} — {amt} {t.currency}"
-                f"  ({t.transaction_date.strftime('%d.%m')})"
+                f"  <i>({t.transaction_date.strftime('%d.%m')})</i>"
             )
 
     b = InlineKeyboardBuilder()
     b.row(
-        InlineKeyboardButton(text="📊 Excel eksport", callback_data=f"adm:export:{u.id}"),
+        InlineKeyboardButton(text="📊 Excel", callback_data=f"adm:export:{u.id}"),
         InlineKeyboardButton(text="🗑 Tarixni tozalash", callback_data=f"adm:clear:{u.id}"),
     )
-    b.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="adm:users:0"))
+    if u.is_active:
+        b.row(InlineKeyboardButton(
+            text="🚫 Bloklash",
+            callback_data=f"adm:block:{u.id}",
+        ))
+    else:
+        b.row(InlineKeyboardButton(
+            text="✅ Faollashtirish",
+            callback_data=f"adm:unblock:{u.id}",
+        ))
+    b.row(InlineKeyboardButton(text="🔙 Foydalanuvchilar", callback_data="adm:users:0"))
 
     return "\n".join(lines), b.as_markup()
 
 
-# ── Admin: export user data as Excel ──────────────────────────────────────────
+# ── Admin: block / unblock user ────────────────────────────────────────────────
 
-@router.callback_query(F.data.startswith("adm:export:"))
+@router.callback_query(F.data.regexp(r"^adm:(block|unblock):\d+$"))
+async def adm_toggle_user(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        return
+    parts = callback.data.split(":")
+    action, user_id = parts[1], int(parts[2])
+    u = await TelegramUser.objects.aget(id=user_id)
+    u.is_active = action == "unblock"
+    await u.asave(update_fields=["is_active"])
+    status = "faollashtirildi ✅" if u.is_active else "bloklandi 🚫"
+    await callback.answer(f"Foydalanuvchi {status}", show_alert=True)
+    text, kb = await _fetch_user_detail(user_id)
+    await _safe_edit(callback, text, parse_mode="HTML", reply_markup=kb)
+
+
+# ── Admin: export user Excel ───────────────────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^adm:export:\d+$"))
 async def adm_export_user(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         return
     user_id = int(callback.data.split(":")[2])
+    await callback.answer("⏳ Excel tayyorlanmoqda...")
     try:
         u = await TelegramUser.objects.aget(id=user_id)
         file_bytes = await export_service.export_excel(u)
-        today = date.today()
         doc = BufferedInputFile(
             file_bytes.read(),
-            filename=f"user_{u.telegram_id}_{today}.xlsx",
+            filename=f"user_{u.telegram_id}_{date.today()}.xlsx",
         )
         await callback.message.answer_document(
             doc,
             caption=f"📊 <b>{u.full_name}</b> — barcha tranzaksiyalar",
             parse_mode="HTML",
         )
-        await callback.answer("✅ Yuborildi")
     except Exception as e:
         logger.exception("Admin export xatosi: %s", e)
-        await callback.answer("❌ Eksport xatosi", show_alert=True)
+        await callback.message.answer("❌ Eksport qilishda xato yuz berdi.")
 
 
 # ── Admin: clear user history ──────────────────────────────────────────────────
 
-@router.callback_query(F.data.startswith("adm:clear:"))
+@router.callback_query(F.data.regexp(r"^adm:clear:\d+$"))
 async def adm_clear_ask(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         return
     user_id = int(callback.data.split(":")[2])
+    count = await Transaction.objects.filter(user_id=user_id).acount()
     b = InlineKeyboardBuilder()
     b.row(
         InlineKeyboardButton(text="🗑 Ha, tozalash", callback_data=f"adm:clear_ok:{user_id}"),
         InlineKeyboardButton(text="❌ Bekor", callback_data=f"adm:user:{user_id}"),
     )
-    await callback.message.edit_text(
+    await _safe_edit(
+        callback,
         f"⚠️ <b>Tarixni tozalash</b>\n{SEP}\n"
-        "Bu foydalanuvchining barcha tranzaksiyalari o'chiriladi.\n\n"
+        f"Bu foydalanuvchining <b>{count}</b> ta yozuvi o'chiriladi.\n\n"
         "Tasdiqlaysizmi?",
         parse_mode="HTML",
         reply_markup=b.as_markup(),
@@ -366,13 +509,14 @@ async def adm_clear_ask(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("adm:clear_ok:"))
+@router.callback_query(F.data.regexp(r"^adm:clear_ok:\d+$"))
 async def adm_clear_confirm(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         return
     user_id = int(callback.data.split(":")[2])
     deleted, _ = await Transaction.objects.filter(user_id=user_id).adelete()
-    await callback.message.edit_text(
+    await _safe_edit(
+        callback,
         f"✅ <b>Tarix tozalandi</b>\n{SEP}\n{deleted} ta yozuv o'chirildi.",
         parse_mode="HTML",
         reply_markup=_back_kb("adm:users:0"),
@@ -387,10 +531,11 @@ async def adm_broadcast_start(callback: CallbackQuery, state: FSMContext) -> Non
     if not _is_admin(callback.from_user.id):
         return
     await state.set_state(AdminState.waiting_broadcast_text)
-    await callback.message.edit_text(
+    await _safe_edit(
+        callback,
         f"📢 <b>Xabar yuborish</b>\n{SEP}\n"
         "Barcha faol foydalanuvchilarga yuboriladigan xabarni yozing:\n\n"
-        "<i>HTML teglari ishlatiladi: &lt;b&gt;, &lt;i&gt;, &lt;code&gt;</i>",
+        "<i>HTML teglari qo'llab-quvvatlanadi: &lt;b&gt;, &lt;i&gt;, &lt;code&gt;</i>",
         parse_mode="HTML",
         reply_markup=_back_kb("adm:menu"),
     )
@@ -401,7 +546,7 @@ async def adm_broadcast_start(callback: CallbackQuery, state: FSMContext) -> Non
 async def adm_broadcast_text(message: Message, state: FSMContext) -> None:
     if not _is_admin(message.from_user.id):
         return
-    text = message.text or ""
+    text = (message.text or "").strip()
     if not text:
         await message.answer("⚠️ Matn yozing.")
         return
@@ -417,9 +562,11 @@ async def adm_broadcast_text(message: Message, state: FSMContext) -> None:
             text=f"✅ {count} ta foydalanuvchiga yuborish",
             callback_data="adm:broadcast_ok",
         ),
-        InlineKeyboardButton(text="✏️ Qayta yozish", callback_data="adm:broadcast"),
     )
-    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="adm:menu"))
+    b.row(
+        InlineKeyboardButton(text="✏️ Qayta yozish", callback_data="adm:broadcast"),
+        InlineKeyboardButton(text="❌ Bekor", callback_data="adm:menu"),
+    )
 
     await message.answer(
         f"📢 <b>Ko'rinish:</b>\n{SEP}\n\n"
@@ -454,8 +601,8 @@ async def adm_broadcast_send(callback: CallbackQuery, state: FSMContext) -> None
             sent += 1
         except Exception:
             failed += 1
-        if sent % 10 == 0:
-            await asyncio.sleep(0.4)
+        if (sent + failed) % 20 == 0:
+            await asyncio.sleep(0.5)
 
     await callback.message.edit_text(
         f"✅ <b>Xabar yuborildi</b>\n{SEP}\n"
@@ -474,14 +621,14 @@ def _get_active_tg_ids() -> list[int]:
     )
 
 
-# ── ℹ️ About ───────────────────────────────────────────────────────────────────
+# ── ℹ️ Bot haqida ──────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "adm:about")
 async def adm_about(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         return
     text = await _fetch_about()
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_back_kb("adm:menu"))
+    await _safe_edit(callback, text, parse_mode="HTML", reply_markup=_back_kb("adm:menu"))
     await callback.answer()
 
 
@@ -495,34 +642,37 @@ def _fetch_about() -> str:
     new_month = TelegramUser.objects.filter(
         created_at__date__gte=today.replace(day=1)
     ).count()
+    total = TelegramUser.objects.count()
+    blocked = TelegramUser.objects.filter(is_active=False).count()
 
     top = list(
         TelegramUser.objects
         .annotate(_tx=Count("transactions"))
-        .order_by("-_tx")[:3]
+        .order_by("-_tx")[:5]
     )
-    medals = ["🥇", "🥈", "🥉"]
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     top_lines = [
-        f"{medals[i]} {u.full_name} — {u._tx} ta" for i, u in enumerate(top)
+        f"  {medals[i]} {u.full_name[:20]} — {u._tx} ta"
+        for i, u in enumerate(top) if u._tx > 0
     ]
 
     return (
         f"ℹ️ <b>Bot haqida</b>\n{SEP}\n\n"
-        f"📅 Bugun qo'shildi:    <b>{new_today}</b>\n"
-        f"📆 Bu hafta:           <b>{new_week}</b>\n"
-        f"🗓 Bu oy:              <b>{new_month}</b>\n\n"
+        f"👥 <b>Foydalanuvchilar:</b>\n"
+        f"  Jami:         <b>{total}</b>\n"
+        f"  Bloklangan:   <b>{blocked}</b>\n"
+        f"  Faol:         <b>{total - blocked}</b>\n\n"
+        f"📈 <b>Yangilar:</b>\n"
+        f"  Bugun:  <b>{new_today}</b>\n"
+        f"  Hafta:  <b>{new_week}</b>\n"
+        f"  Oy:     <b>{new_month}</b>\n\n"
         f"{SEP}\n\n"
-        f"🏆 <b>TOP-3 faol foydalanuvchi:</b>\n"
-        + "\n".join(top_lines)
+        f"🏆 <b>TOP-5 faol foydalanuvchi:</b>\n"
+        + ("\n".join(top_lines) if top_lines else "  Hali tranzaksiya yo'q")
     )
 
 
-# ── 🤖 Gemini token stats ──────────────────────────────────────────────────────
-
-def _pct_bar(pct: float, width: int = 12) -> str:
-    filled = round(pct / 100 * width)
-    return "▓" * filled + "░" * (width - filled)
-
+# ── 🤖 Gemini token holati ─────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "adm:gemini")
 async def adm_gemini(callback: CallbackQuery) -> None:
@@ -541,20 +691,24 @@ async def adm_gemini(callback: CallbackQuery) -> None:
         f"📅 Sana:   <b>{s.day}</b>\n"
         f"🔧 Model:  <code>{s.model or 'gemini-2.5-flash'}</code>\n\n"
         f"{SEP}\n\n"
-        f"<b>📨 So'rovlar (bugun):</b>{warn_req}\n"
+        f"<b>📨 So'rovlar (bugun):{warn_req}</b>\n"
         f"  Ishlatildi:  <b>{s.requests}</b> / 500\n"
         f"  Qoldi:       <b>{s.req_remaining}</b>\n"
         f"  <code>{_pct_bar(s.req_pct)}</code>  {s.req_pct:.1f}%\n\n"
-        f"<b>🔤 Tokenlar (bugun):</b>{warn_tok}\n"
-        f"  Prompt:      <b>{s.prompt_tokens:,}</b>\n"
-        f"  Javob:       <b>{s.response_tokens:,}</b>\n"
-        f"  Jami:        <b>{s.total_tokens:,}</b> / 1 000 000\n"
-        f"  Qoldi:       <b>{s.tok_remaining:,}</b>\n"
+        f"<b>🔤 Tokenlar (bugun):{warn_tok}</b>\n"
+        f"  Prompt:  <b>{s.prompt_tokens:,}</b>\n"
+        f"  Javob:   <b>{s.response_tokens:,}</b>\n"
+        f"  Jami:    <b>{s.total_tokens:,}</b> / 1 000 000\n"
+        f"  Qoldi:   <b>{s.tok_remaining:,}</b>\n"
         f"  <code>{_pct_bar(s.tok_pct)}</code>  {s.tok_pct:.1f}%\n\n"
         f"{SEP}\n\n"
         f"<b>⚡ Joriy sessiya:</b>\n"
         f"  So'rovlar: <b>{sess_req}</b>\n"
         f"  Tokenlar:  <b>{sess_tok:,}</b>"
     )
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_back_kb("adm:menu"))
+
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="🔄 Yangilash", callback_data="adm:gemini"))
+    b.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="adm:menu"))
+    await _safe_edit(callback, text, parse_mode="HTML", reply_markup=b.as_markup())
     await callback.answer()
