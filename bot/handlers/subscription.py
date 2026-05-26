@@ -13,6 +13,7 @@ from apps.users.models import RequiredChannel, TelegramUser
 from bot.middlewares.subscription import (
     SUB_CHECK_CB,
     SUB_VISIT_CB,
+    _VISITED,
     _channels_strictly_blocking,
     _channels_to_show,
     _sub_keyboard,
@@ -36,10 +37,28 @@ async def sub_visit(callback: CallbackQuery, db_user: TelegramUser) -> None:
         await callback.answer("❌ Kanal topilmadi.", show_alert=True)
         return
 
-    mark_visited(callback.from_user.id, ch_db_id)
+    user_id = callback.from_user.id
+    mark_visited(user_id, ch_db_id)
 
-    # Kanalga yo'naltirish (URL tugma bilan bir xil natija, lekin trackingga mumkin)
-    await callback.answer(url=ch.link)
+    # Klaviaturani yangilash — bosilgan kanal ✅ bilan belgilanadi
+    bot: Bot = callback.bot
+    to_show = await _channels_to_show(bot, user_id)
+    visited = _VISITED.get(user_id, set())
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=_sub_keyboard(to_show, visited)
+        )
+    except Exception:
+        pass
+
+    # Kanalga yo'naltirish
+    if ch.link:
+        await callback.answer(url=ch.link)
+    else:
+        await callback.answer(
+            "⚠️ Kanal havolasi topilmadi. Admin bilan bog'laning.",
+            show_alert=True,
+        )
 
 
 @router.callback_query(F.data == SUB_CHECK_CB)
@@ -65,10 +84,10 @@ async def sub_check(callback: CallbackQuery, db_user: TelegramUser) -> None:
             pass
         return
 
-    # Kamida bitta "Zayafka yuborish" bosilganmi?
+    # Kamida bitta kanal tugmasi bosilganmi?
     if not has_visited_any(user_id, to_show):
         await callback.answer(
-            "⚠️ Avval «Zayafka yuborish» tugmasini bosing!",
+            "⚠️ Avval kanal tugmalarini bosib, kanallarga o'ting!",
             show_alert=True,
         )
         return
@@ -79,9 +98,10 @@ async def sub_check(callback: CallbackQuery, db_user: TelegramUser) -> None:
     if still_blocking:
         # Public kanal(lar)ga hali a'zo bo'lmagan
         await callback.answer("⚠️ Hali obuna bo'lmadingiz!", show_alert=True)
+        visited = _VISITED.get(user_id, set())
         try:
             await callback.message.edit_reply_markup(
-                reply_markup=_sub_keyboard(still_blocking)
+                reply_markup=_sub_keyboard(still_blocking, visited)
             )
         except Exception:
             pass

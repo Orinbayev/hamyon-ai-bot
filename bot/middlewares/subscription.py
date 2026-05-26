@@ -36,12 +36,17 @@ _PASS_CACHE: dict[int, float] = {}
 PASS_TTL = 300
 
 
-def _sub_keyboard(channels: list) -> Any:
+def _sub_keyboard(channels: list, visited: set | None = None) -> Any:
     b = InlineKeyboardBuilder()
+    visited = visited or set()
     for i, ch in enumerate(channels):
         num = NUMS[i] if i < len(NUMS) else f"{i + 1}."
+        if ch.id in visited:
+            label = f"{num} ✅ {ch.title}"
+        else:
+            label = f"{num} ➡️ {ch.title}"
         b.row(InlineKeyboardButton(
-            text=f"{num} Zayafka yuborish",
+            text=label,
             callback_data=f"{SUB_VISIT_CB}:{ch.id}",
         ))
     b.row(InlineKeyboardButton(text="✅ Tekshirish", callback_data=SUB_CHECK_CB))
