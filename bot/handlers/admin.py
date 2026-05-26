@@ -857,12 +857,9 @@ async def adm_ch_add_priv(callback: CallbackQuery, state: FSMContext) -> None:
     await _safe_edit(
         callback,
         f"🔒 <b>Private kanal qo'shish</b>\n{SEP}\n\n"
-        "Kanalning <b>ID</b> sini yuboring.\n\n"
-        "<b>ID ni qanday topish:</b>\n"
-        "1. Botni kanalga admin qo'shing\n"
-        "2. Kanalga istalgan xabar yuboring\n"
-        "3. @userinfobot ga forward qiling — ID ko'rinadi\n\n"
-        "<b>Misol:</b> <code>-1001234567890</code>",
+        "Kanaldan istalgan xabarni shu botga <b>forward qiling</b>.\n\n"
+        "Bot ID va nomni avtomatik oladi.\n\n"
+        "⚠️ Bot kanalda <b>admin</b> bo'lishi kerak.",
         parse_mode="HTML",
         reply_markup=_back_kb("adm:channels"),
     )
@@ -873,9 +870,44 @@ async def adm_ch_add_priv(callback: CallbackQuery, state: FSMContext) -> None:
 async def adm_ch_receive_id(message: Message, state: FSMContext) -> None:
     if not _is_admin(message.from_user.id):
         return
+
+    # ── Forward orqali ────────────────────────────────────────────────────────
+    origin = message.forward_origin  # Aiogram 3.x
+    if origin is None and message.forward_from_chat:
+        # Eski Telegram versiyalari uchun fallback
+        chat_id = message.forward_from_chat.id
+        title = message.forward_from_chat.title or str(chat_id)
+        await _ask_invite_link(message, state, chat_id, title)
+        return
+
+    if origin is not None:
+        from aiogram.types import MessageOriginChannel, MessageOriginChat
+        if isinstance(origin, MessageOriginChannel):
+            chat_id = origin.chat.id
+            title = origin.chat.title or str(chat_id)
+            await _ask_invite_link(message, state, chat_id, title)
+            return
+        elif isinstance(origin, MessageOriginChat):
+            chat_id = origin.sender_chat.id
+            title = origin.sender_chat.title or str(chat_id)
+            await _ask_invite_link(message, state, chat_id, title)
+            return
+        else:
+            await message.answer(
+                "❌ Bu kanal xabari emas.\n"
+                "Kanaldan xabarni <b>forward</b> qiling.",
+                parse_mode="HTML",
+            )
+            return
+
+    # ── Fallback: qo'lda ID kiritish ─────────────────────────────────────────
     raw = (message.text or "").strip()
     if not raw.lstrip("-").isdigit():
-        await message.answer("❌ Faqat raqam kiriting. Misol: <code>-1001234567890</code>", parse_mode="HTML")
+        await message.answer(
+            "❌ Kanaldan xabar <b>forward</b> qiling.\n\n"
+            "Yoki ID ni qo'lda kiriting: <code>-1001234567890</code>",
+            parse_mode="HTML",
+        )
         return
 
     channel_id = int(raw)
@@ -884,24 +916,35 @@ async def adm_ch_receive_id(message: Message, state: FSMContext) -> None:
     try:
         chat = await bot.get_chat(channel_id)
         title = chat.title or str(channel_id)
-    except Exception as e:
-        title = None
-        await wait_msg.edit_text(
-            f"⚠️ Kanal topilmadi: <code>{e}</code>\n\n"
-            "Davom etish uchun invite link ni yuboring:",
-            parse_mode="HTML",
-        )
-
-    if title:
         await wait_msg.edit_text(
             f"✅ Kanal topildi: <b>{title}</b>\n\n"
             "Endi kanal <b>invite havolasini</b> yuboring.\n"
             "<b>Misol:</b> <code>https://t.me/+xxxxxxxxxxxxxx</code>",
             parse_mode="HTML",
         )
-
-    await state.update_data(channel_id=channel_id, title=title or str(channel_id))
+    except Exception as e:
+        title = str(channel_id)
+        await wait_msg.edit_text(
+            f"⚠️ Kanal topilmadi: <code>{e}</code>\n\n"
+            "Invite link ni yuboring:",
+            parse_mode="HTML",
+        )
+    await state.update_data(channel_id=channel_id, title=title)
     await state.set_state(ChannelAddState.waiting_invite_link)
+
+
+async def _ask_invite_link(message: Message, state: FSMContext, channel_id: int, title: str) -> None:
+    await state.update_data(channel_id=channel_id, title=title)
+    await state.set_state(ChannelAddState.waiting_invite_link)
+    await message.answer(
+        f"✅ <b>Kanal aniqlandi:</b>\n"
+        f"📛 {title}\n"
+        f"🆔 <code>{channel_id}</code>\n\n"
+        "Endi kanal <b>invite havolasini</b> yuboring.\n"
+        "<i>(Kanal Settings → Invite links → Create link)</i>\n\n"
+        "<b>Misol:</b> <code>https://t.me/+xxxxxxxxxxxxxx</code>",
+        parse_mode="HTML",
+    )
 
 
 @router.message(ChannelAddState.waiting_invite_link)
