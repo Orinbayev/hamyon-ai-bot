@@ -29,7 +29,7 @@ router = Router(name="subscription")
 
 @router.callback_query(F.data.startswith(f"{SUB_VISIT_CB}:"))
 async def sub_visit(callback: CallbackQuery, db_user: TelegramUser) -> None:
-    """Kanal tugmasi bosilganda: kanalga o'tkazadi + "bosildi" belgilaydi."""
+    """Kanal tugmasi bosilganda: bosilganini belgilaydi + URL tugma ko'rsatadi."""
     try:
         ch_db_id = int(callback.data.split(":")[2])
         ch = await RequiredChannel.objects.aget(id=ch_db_id)
@@ -40,23 +40,24 @@ async def sub_visit(callback: CallbackQuery, db_user: TelegramUser) -> None:
     user_id = callback.from_user.id
     mark_visited(user_id, ch_db_id)
 
-    # Klaviaturani yangilash — bosilgan kanal ✅ bilan belgilanadi
+    # Klaviaturani yangilash:
+    #   - bosilgan kanal ✅ bilan
+    #   - pastda URL tugma (kanalga o'tish uchun)
     bot: Bot = callback.bot
     to_show = await _channels_to_show(bot, user_id)
     visited = _VISITED.get(user_id, set())
     try:
         await callback.message.edit_reply_markup(
-            reply_markup=_sub_keyboard(to_show, visited)
+            reply_markup=_sub_keyboard(to_show, visited, open_ch=ch)
         )
     except Exception:
         pass
 
-    # Kanalga yo'naltirish
     if ch.link:
-        await callback.answer(url=ch.link)
+        await callback.answer()
     else:
         await callback.answer(
-            "⚠️ Kanal havolasi topilmadi. Admin bilan bog'laning.",
+            "⚠️ Kanal havolasi topilmadi. Admin invite link qo'shishi kerak.",
             show_alert=True,
         )
 

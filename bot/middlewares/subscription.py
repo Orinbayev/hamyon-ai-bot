@@ -36,7 +36,10 @@ _PASS_CACHE: dict[int, float] = {}
 PASS_TTL = 300
 
 
-def _sub_keyboard(channels: list, visited: set | None = None) -> Any:
+def _sub_keyboard(channels: list, visited: set | None = None, open_ch=None) -> Any:
+    """
+    open_ch — bosilgan kanal: uning URL tugmasi pastda ko'rsatiladi.
+    """
     b = InlineKeyboardBuilder()
     visited = visited or set()
     for i, ch in enumerate(channels):
@@ -48,6 +51,11 @@ def _sub_keyboard(channels: list, visited: set | None = None) -> Any:
         b.row(InlineKeyboardButton(
             text=label,
             callback_data=f"{SUB_VISIT_CB}:{ch.id}",
+        ))
+    if open_ch and open_ch.link:
+        b.row(InlineKeyboardButton(
+            text=f"🔗 {open_ch.title} — kanalga o'ting ↗",
+            url=open_ch.link,
         ))
     b.row(InlineKeyboardButton(text="✅ Tekshirish", callback_data=SUB_CHECK_CB))
     return b.as_markup()
