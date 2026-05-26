@@ -18,12 +18,10 @@ from bot.keyboards.inline import (
     delete_confirm_keyboard,
     export_format_keyboard,
     export_period_keyboard,
-    history_delete_keyboard,
     tx_delete_confirm_keyboard,
 )
 from services import export as export_service
 from services import reports
-from services.reports import build_history_with_txs
 
 logger = logging.getLogger("bot")
 router = Router(name="commands")
@@ -65,9 +63,8 @@ async def cmd_categories(message: Message, db_user: TelegramUser):
 
 @router.message(Command("history"))
 async def cmd_history(message: Message, db_user: TelegramUser):
-    text, txs = await build_history_with_txs(db_user, limit=20)
-    kb = history_delete_keyboard(txs) if txs else None
-    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+    text = await reports.build_history(db_user, limit=20)
+    await message.answer(text, parse_mode="HTML")
 
 
 # ── /delete ──────────────────────────────────────────────────────────────────

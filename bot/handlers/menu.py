@@ -9,10 +9,9 @@ from aiogram.types import Message
 
 from apps.users.models import TelegramUser
 from apps.transactions.models import Transaction
-from bot.keyboards.inline import clear_confirm_keyboard, export_format_keyboard, history_delete_keyboard
+from bot.keyboards.inline import clear_confirm_keyboard, export_format_keyboard
 from bot.keyboards.reply import main_menu
 from services import reports
-from services.reports import build_history_with_txs
 
 logger = logging.getLogger("bot")
 router = Router(name="menu")
@@ -56,9 +55,8 @@ async def menu_categories(message: Message, db_user: TelegramUser):
 
 @router.message(F.text == "📋 Tarix")
 async def menu_history(message: Message, db_user: TelegramUser):
-    text, txs = await build_history_with_txs(db_user, limit=20)
-    kb = history_delete_keyboard(txs) if txs else None
-    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+    text = await reports.build_history(db_user, limit=20)
+    await _send_report(message, text)
 
 
 @router.message(F.text == "📤 Eksport")

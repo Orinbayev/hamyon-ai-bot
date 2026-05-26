@@ -264,7 +264,7 @@ def _categories(user: TelegramUser) -> str:
 def _history_text(txs: list, limit: int = 20) -> str:
     if not txs:
         return f"📋 <b>Tarix</b>\n{SEP}\n\nHali hech narsa yozilmagan."
-    lines = [f"📋 <b>Oxirgi {len(txs)} ta yozuv</b>  <i>(🗑 tugma — o'chirish)</i>", SEP]
+    lines = [f"📋 <b>Oxirgi {len(txs)} ta yozuv</b>", SEP]
     prev_date = None
     for t in txs:
         if t.transaction_date != prev_date:
@@ -282,6 +282,7 @@ def _history_text(txs: list, limit: int = 20) -> str:
             f"   {sign}{_fmt(t.amount, t.currency)}"
             f"  <code>#{t.id}</code>{note}"
         )
+    lines.append(f"\n{SEP}\n🗑 O'chirish: /delete yoki /delete {txs[-1].id}")
     return "\n".join(lines)
 
 
