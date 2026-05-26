@@ -2,16 +2,17 @@
 SubscriptionMiddleware — majburiy kanal obunasini tekshiradi.
 
 Flow:
-  1. Foydalanuvchi "1-Kanal", "2-Kanal" tugmalarini bosadi (zayafka)
-  2. Har bir tugma bosilganda URL ochiladi (kanalga o'tish)
-  3. Barcha tugmalar bosilgandan keyin "Tekshirish" ishlaydi
+  1. Foydalanuvchi "1-Kanal" tugmasini bosadi → URL button ko'rinadi
+  2. Foydalanuvchi kanalga o'tib "Zayafka yuborish" tugmasini bosadi
+  3. Bot chat_join_request eventini qabul qiladi → kanal tasdiqlangan deb belgilanadi
+  4. "Tekshirish" bosilganda barcha kanallar tekshiriladi
 """
 
 import logging
 import time
 from typing import Any, Awaitable, Callable
 
-from aiogram import BaseMiddleware, Bot
+from aiogram import BaseMiddleware
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -27,18 +28,21 @@ logger = logging.getLogger("bot")
 SUB_CHECK_CB = "sub:check"
 SUB_VISIT_CB = "sub:visit"   # sub:visit:{channel_db_id}
 
-# Bosilgan kanallar: {user_id: {channel_db_id, ...}}
+# Zayafka yuborilgan kanallar: {user_id: {channel_db_id, ...}}
 _VISITED: dict[int, set[int]] = {}
 
 # 5 daqiqa pass: {user_id: timestamp}
 _PASS_CACHE: dict[int, float] = {}
 PASS_TTL = 300
 
+# Obuna xabarining joylashuvi: {user_id: (chat_id, message_id)}
+_SUB_MESSAGES: dict[int, tuple[int, int]] = {}
+
 
 def _sub_keyboard(channels: list, visited: set | None = None, open_ch=None) -> Any:
     """
     channels  — barcha aktiv kanallar
-    visited   — bosilgan kanal db id'lari (✅ ko'rsatish uchun)
+    visited   — zayafka yuborilgan kanal db id'lari (✅ ko'rsatish uchun)
     open_ch   — URL tugma ko'rsatiladigan kanal
     """
     b = InlineKeyboardBuilder()
@@ -61,7 +65,10 @@ def _sub_keyboard(channels: list, visited: set | None = None, open_ch=None) -> A
 def _sub_text(n: int) -> str:
     kanallar = "kanalga" if n == 1 else "ta kanalga"
     count = "" if n == 1 else f"{n} "
-    return f"🔒 Botdan foydalanish uchun {count}{kanallar} obuna bo'ling!"
+    return (
+        f"🔒 Botdan foydalanish uchun {count}{kanallar} zayafka yuboring!\n\n"
+        f"Kanal tugmasini bosing → kanalga o'ting → \"Zayafka yuborish\" tugmasini bosing."
+    )
 
 
 def mark_visited(user_id: int, channel_db_id: int) -> None:
@@ -69,7 +76,7 @@ def mark_visited(user_id: int, channel_db_id: int) -> None:
 
 
 def has_visited_all(user_id: int, channels: list) -> bool:
-    """Barcha kanal tugmalari bosilganmi?"""
+    """Barcha kanallarga zayafka yuborilganmi?"""
     visited = _VISITED.get(user_id, set())
     return all(ch.id in visited for ch in channels)
 
@@ -114,22 +121,24 @@ class SubscriptionMiddleware(BaseMiddleware):
         if not channels:
             return await handler(event, data)
 
-        # Barcha tugmalar oldin bosilgan bo'lsa — pass cacheni yangilab o'tkazish
+        # Barcha kanallar tasdiqlangan bo'lsa — pass cacheni yangilab o'tkazish
         if has_visited_all(tg_id, channels):
             set_pass_cache(tg_id)
             return await handler(event, data)
 
-        # Obuna xabarini ko'rsatish
+        # Obuna xabarini ko'rsatish va xabar joylashuvini saqlash
         visited = _VISITED.get(tg_id, set())
         kb = _sub_keyboard(channels, visited=visited)
         text = _sub_text(len(channels))
 
         if isinstance(event, Message):
-            await event.answer(text, reply_markup=kb)
+            msg = await event.answer(text, reply_markup=kb)
+            _SUB_MESSAGES[tg_id] = (msg.chat.id, msg.message_id)
         elif isinstance(event, CallbackQuery):
-            await event.answer("⛔ Avval kanallarga obuna bo'ling!", show_alert=True)
+            await event.answer("⛔ Avval kanallarga zayafka yuboring!", show_alert=True)
             try:
-                await event.message.answer(text, reply_markup=kb)
+                msg = await event.message.answer(text, reply_markup=kb)
+                _SUB_MESSAGES[tg_id] = (msg.chat.id, msg.message_id)
             except Exception:
                 pass
         return
@@ -139,3 +148,9 @@ class SubscriptionMiddleware(BaseMiddleware):
 def _load_active_channels():
     from apps.users.models import RequiredChannel
     return list(RequiredChannel.objects.filter(is_active=True))
+
+
+@sync_to_async
+def _get_channel_by_tg_id(tg_id: int):
+    from apps.users.models import RequiredChannel
+    return RequiredChannel.objects.filter(channel_id=tg_id, is_active=True).first()
