@@ -1,7 +1,7 @@
 """
 Subscription handlers:
-  sub:visit:{id} — kanalga o'tish + bosilganini belgilash
-  sub:check      — tekshirish (faqat visit bosilgandan keyin ishlaydi)
+  sub:visit:{id} — kanal tugmasi bosilganda URL tugma ko'rsatadi
+  sub:check      — zayafka/obuna tasdiqlanganmi tekshiradi
 """
 
 import logging
@@ -13,13 +13,10 @@ from apps.users.models import RequiredChannel, TelegramUser
 from bot.middlewares.subscription import (
     SUB_CHECK_CB,
     SUB_VISIT_CB,
-    _VISITED,
-    _channels_strictly_blocking,
+    _ZAYAFKA_DONE,
+    _channels_still_blocking,
     _channels_to_show,
     _sub_keyboard,
-    _sub_text,
-    has_visited_any,
-    mark_visited,
     set_pass_cache,
 )
 
@@ -29,7 +26,11 @@ router = Router(name="subscription")
 
 @router.callback_query(F.data.startswith(f"{SUB_VISIT_CB}:"))
 async def sub_visit(callback: CallbackQuery, db_user: TelegramUser) -> None:
-    """Kanal tugmasi bosilganda: bosilganini belgilaydi + URL tugma ko'rsatadi."""
+    """
+    Kanal tugmasi bosilganda:
+    - Pastda URL tugma paydo bo'ladi (kanalga o'tish uchun)
+    - Keyin kanaldan xabar forward qilinsa bot taniydi
+    """
     try:
         ch_db_id = int(callback.data.split(":")[2])
         ch = await RequiredChannel.objects.aget(id=ch_db_id)
@@ -38,45 +39,41 @@ async def sub_visit(callback: CallbackQuery, db_user: TelegramUser) -> None:
         return
 
     user_id = callback.from_user.id
-    mark_visited(user_id, ch_db_id)
-
-    # Klaviaturani yangilash:
-    #   - bosilgan kanal ✅ bilan
-    #   - pastda URL tugma (kanalga o'tish uchun)
     bot: Bot = callback.bot
+
     to_show = await _channels_to_show(bot, user_id)
-    visited = _VISITED.get(user_id, set())
+    done = _ZAYAFKA_DONE.get(user_id, set())
+
     try:
         await callback.message.edit_reply_markup(
-            reply_markup=_sub_keyboard(to_show, visited, open_ch=ch)
+            reply_markup=_sub_keyboard(to_show, done=done, open_ch=ch)
         )
     except Exception:
         pass
 
-    if ch.link:
-        await callback.answer()
-    else:
+    if not ch.link:
         await callback.answer(
-            "⚠️ Kanal havolasi topilmadi. Admin invite link qo'shishi kerak.",
+            "⚠️ Kanal havolasi yo'q. Admin invite link qo'shishi kerak.",
             show_alert=True,
         )
+    else:
+        await callback.answer()
 
 
 @router.callback_query(F.data == SUB_CHECK_CB)
 async def sub_check(callback: CallbackQuery, db_user: TelegramUser) -> None:
     """
     Tekshirish:
-      1. Avval kamida bitta "Zayafka yuborish" bosilganligini tekshiradi
-      2. Keyin public kanallar uchun aniq obuna tekshiruvi
+    - Obuna API orqali tasdiqlanganmi?
+    - Yoki zayafka yuborilganmi?
+    Ikkalasidan biri bo'lsa — ruxsat.
     """
     bot: Bot = callback.bot
     user_id = callback.from_user.id
 
-    # Avval ko'rsatiladigan kanallarni olish (qaysilar hali to'siq?)
-    to_show = await _channels_to_show(bot, user_id)
+    still_blocking = await _channels_still_blocking(bot, user_id)
 
-    if not to_show:
-        # Hamma kanalga a'zo bo'lgan
+    if not still_blocking:
         set_pass_cache(user_id)
         await callback.answer("✅ Botdan foydalanishingiz mumkin!", show_alert=True)
         try:
@@ -85,33 +82,17 @@ async def sub_check(callback: CallbackQuery, db_user: TelegramUser) -> None:
             pass
         return
 
-    # Kamida bitta kanal tugmasi bosilganmi?
-    if not has_visited_any(user_id, to_show):
-        await callback.answer(
-            "⚠️ Avval kanal tugmalarini bosib, kanallarga o'ting!",
-            show_alert=True,
-        )
-        return
-
-    # Visit bosilgan — endi aniq tekshiruv (public / bot admin kanallar)
-    still_blocking = await _channels_strictly_blocking(bot, user_id)
-
-    if still_blocking:
-        # Public kanal(lar)ga hali a'zo bo'lmagan
-        await callback.answer("⚠️ Hali obuna bo'lmadingiz!", show_alert=True)
-        visited = _VISITED.get(user_id, set())
-        try:
-            await callback.message.edit_reply_markup(
-                reply_markup=_sub_keyboard(still_blocking, visited)
-            )
-        except Exception:
-            pass
-        return
-
-    # Barcha tekshiruvlar o'tdi → o'tkazib yuborish
-    set_pass_cache(user_id)
-    await callback.answer("✅ Botdan foydalanishingiz mumkin!", show_alert=True)
+    # Hali bloklashda — nima qilish kerakligini ko'rsat
+    names = ", ".join(ch.title for ch in still_blocking)
+    await callback.answer(
+        f"⚠️ Quyidagi kanal(lar) tasdiqlanmadi:\n{names}\n\n"
+        "Kanalga o'ting va xabar forward qiling!",
+        show_alert=True,
+    )
+    done = _ZAYAFKA_DONE.get(user_id, set())
     try:
-        await callback.message.delete()
+        await callback.message.edit_reply_markup(
+            reply_markup=_sub_keyboard(still_blocking, done=done)
+        )
     except Exception:
         pass

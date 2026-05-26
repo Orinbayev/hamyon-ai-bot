@@ -55,6 +55,9 @@ async def main():
     dp.include_router(voice.router)
     dp.include_router(message.router)
 
+    # Render deploy paytida eski bot sessiyasini yopish (TelegramConflictError oldini olish)
+    await bot.delete_webhook(drop_pending_updates=True)
+
     asyncio.create_task(run_notification_loop(bot))
 
     logger.info("Bot polling boshlandi...")
