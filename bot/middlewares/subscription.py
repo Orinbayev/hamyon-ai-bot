@@ -1,9 +1,19 @@
 """
 SubscriptionMiddleware — majburiy kanal obunasini tekshiradi.
-AuthMiddleware dan KEYIN ro'yxatdan o'tishi kerak.
+
+Ikki rejim:
+  display_check  — ko'rsatish uchun: public=aniq tekshir, private=exception→ko'rsat
+  strict_check   — o'tkazish uchun:  public=aniq tekshir, private=exception→o'tkaz
+
+Natija:
+  - Public kanal, a'zo emas          → blok (ko'rsat VA o'tkaz olmaydi)
+  - Public kanal, a'zo               → o'tadi
+  - Private kanal, bot admin emas    → message ko'rsatiladi, Tekshirish bosganda o'tadi
+  - Private kanal, bot admin         → xuddi public kabi aniq tekshiriladi
 """
 
 import logging
+import time
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware, Bot
@@ -21,6 +31,11 @@ logger = logging.getLogger("bot")
 
 SUB_CHECK_CB = "sub:check"
 NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+# Tekshirish bosilgandan keyingi qisqa oyna (sekund):
+# bu vaqt ichida kanal obunasiz ham xabar yozish mumkin
+_PASS_CACHE: dict[int, float] = {}  # user_id → timestamp
+PASS_TTL = 300  # 5 daqiqa
 
 
 def _sub_keyboard(channels: list) -> Any:
@@ -61,14 +76,21 @@ class SubscriptionMiddleware(BaseMiddleware):
             if event.data == SUB_CHECK_CB or (event.data or "").startswith("adm:"):
                 return await handler(event, data)
 
-        bot: Bot = data["bot"]
-        not_subscribed = await _check_subscriptions(bot, tg_id)
-
-        if not not_subscribed:
+        # Qisqa "pass" oynasi aktiv bo'lsa o'tkazib yuborish
+        ts = _PASS_CACHE.get(tg_id, 0)
+        if time.time() - ts < PASS_TTL:
             return await handler(event, data)
 
-        kb = _sub_keyboard(not_subscribed)
-        text = _sub_text(len(not_subscribed))
+        bot: Bot = data["bot"]
+
+        # Ko'rsatish uchun tekshiruv (private kanal exception → ko'rsat)
+        to_show = await _channels_to_show(bot, tg_id)
+
+        if not to_show:
+            return await handler(event, data)
+
+        kb = _sub_keyboard(to_show)
+        text = _sub_text(len(to_show))
 
         if isinstance(event, Message):
             await event.answer(text, reply_markup=kb)
@@ -78,7 +100,7 @@ class SubscriptionMiddleware(BaseMiddleware):
                 await event.message.answer(text, reply_markup=kb)
             except Exception:
                 pass
-        return
+        return  # handler chaqirilmaydi
 
 
 @sync_to_async
@@ -87,26 +109,50 @@ def _load_active_channels():
     return list(RequiredChannel.objects.filter(is_active=True))
 
 
-async def _check_subscriptions(bot: Bot, user_id: int) -> list:
-    """Obuna bo'lmagan kanallar ro'yxatini qaytaradi.
-
-    Qoidalar:
-    - "left" yoki "kicked" → blok
-    - "restricted" (join request yuborgan, kutmoqda) → o'tkazadi
-    - Exception (bot admin emas, yoki private kanal) → o'tkazadi
+async def _channels_to_show(bot: Bot, user_id: int) -> list:
+    """
+    Ko'rsatish ro'yxati:
+      - Public kanal → aniq tekshiradi: "left"/"kicked" → qo'shadi
+      - Private kanal (exception) → har doim qo'shadi (ko'rsatish uchun)
     """
     channels = await _load_active_channels()
     if not channels:
         return []
 
-    not_subscribed = []
+    result = []
     for ch in channels:
         try:
             member = await bot.get_chat_member(ch.channel_id, user_id)
             if member.status in ("left", "kicked"):
-                not_subscribed.append(ch)
-            # member, administrator, creator, restricted → o'tadi
+                result.append(ch)
+            # member/administrator/creator/restricted → o'tadi
         except Exception as e:
-            # Bot kanalda admin emas yoki kanal tekshirib bo'lmaydi — bloklamaydi
-            logger.debug("Kanal tekshirib bo'lmadi (id=%s): %s", ch.channel_id, e)
-    return not_subscribed
+            logger.debug("get_chat_member xatosi (id=%s): %s", ch.channel_id, e)
+            result.append(ch)  # tekshirib bo'lmadi → ko'rsat (ehtiyot uchun)
+    return result
+
+
+async def _channels_blocking(bot: Bot, user_id: int) -> list:
+    """
+    O'tkazmaslik uchun ro'yxat (faqat aniq tekshirib bo'linadigan kanallar):
+      - Public kanal yoki bot admin → "left"/"kicked" → qo'shadi
+      - Exception → o'tkazadi (tekshirib bo'lmadi → yumshoq cheklov)
+    """
+    channels = await _load_active_channels()
+    if not channels:
+        return []
+
+    result = []
+    for ch in channels:
+        try:
+            member = await bot.get_chat_member(ch.channel_id, user_id)
+            if member.status in ("left", "kicked"):
+                result.append(ch)
+        except Exception as e:
+            logger.debug("Kanal tekshirib bo'lmadi, o'tkazilmoqda (id=%s): %s", ch.channel_id, e)
+    return result
+
+
+def set_pass_cache(user_id: int) -> None:
+    """Foydalanuvchini PASS_TTL sekund davomida obuna tekshiruvdan o'tkazib yuborish."""
+    _PASS_CACHE[user_id] = time.time()
