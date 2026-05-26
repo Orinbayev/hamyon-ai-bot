@@ -1,11 +1,10 @@
 """
 SubscriptionMiddleware — majburiy kanal obunasini tekshiradi.
 
-Zayafka flow:
-  1. Foydalanuvchi kanal tugmasini bosadi → URL tugma chiqadi
-  2. Kanalga o'tib, istalgan xabarni botga FORWARD qiladi
-  3. Bot forward'ni taniydi → zayafka tasdiqlanadi
-  4. "Tekshirish" bosilganda ruxsat beriladi
+Flow:
+  1. Foydalanuvchi "1-Kanal", "2-Kanal" tugmalarini bosadi (zayafka)
+  2. Har bir tugma bosilganda URL ochiladi (kanalga o'tish)
+  3. Barcha tugmalar bosilgandan keyin "Tekshirish" ishlaydi
 """
 
 import logging
@@ -17,7 +16,6 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     Message,
-    MessageOriginChannel,
     TelegramObject,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -29,37 +27,31 @@ logger = logging.getLogger("bot")
 SUB_CHECK_CB = "sub:check"
 SUB_VISIT_CB = "sub:visit"   # sub:visit:{channel_db_id}
 
-NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+# Bosilgan kanallar: {user_id: {channel_db_id, ...}}
+_VISITED: dict[int, set[int]] = {}
 
-# Zayafka tasdiqlangan kanallar: {user_id: {channel_db_id, ...}}
-_ZAYAFKA_DONE: dict[int, set[int]] = {}
-
-# 5 daqiqa pass oynasi: {user_id: timestamp}
+# 5 daqiqa pass: {user_id: timestamp}
 _PASS_CACHE: dict[int, float] = {}
 PASS_TTL = 300
 
 
-def _sub_keyboard(channels: list, done: set | None = None, open_ch=None) -> Any:
+def _sub_keyboard(channels: list, visited: set | None = None, open_ch=None) -> Any:
     """
-    channels  — ko'rsatiladigan kanallar
-    done      — zayafka/obuna tasdiqlangan kanal db id'lari
-    open_ch   — URL tugma ko'rsatiladigan kanal (bosilgandan keyin)
+    channels  — barcha aktiv kanallar
+    visited   — bosilgan kanal db id'lari (✅ ko'rsatish uchun)
+    open_ch   — URL tugma ko'rsatiladigan kanal
     """
     b = InlineKeyboardBuilder()
-    done = done or set()
+    visited = visited or set()
     for i, ch in enumerate(channels):
-        num = NUMS[i] if i < len(NUMS) else f"{i + 1}."
-        if ch.id in done:
-            label = f"{num} ✅ {ch.title}"
-        else:
-            label = f"{num} ➡️ {ch.title}"
+        label = f"✅ {i + 1}-Kanal" if ch.id in visited else f"{i + 1}-Kanal"
         b.row(InlineKeyboardButton(
             text=label,
             callback_data=f"{SUB_VISIT_CB}:{ch.id}",
         ))
     if open_ch and open_ch.link:
         b.row(InlineKeyboardButton(
-            text=f"🔗 {open_ch.title} — kanalga o'ting ↗",
+            text="🔗 Kanalga o'ting ↗",
             url=open_ch.link,
         ))
     b.row(InlineKeyboardButton(text="✅ Tekshirish", callback_data=SUB_CHECK_CB))
@@ -69,19 +61,17 @@ def _sub_keyboard(channels: list, done: set | None = None, open_ch=None) -> Any:
 def _sub_text(n: int) -> str:
     kanallar = "kanalga" if n == 1 else "ta kanalga"
     count = "" if n == 1 else f"{n} "
-    return (
-        f"🔒 Botdan foydalanish uchun {count}{kanallar} obuna bo'ling!\n\n"
-        f"📨 Obuna bo'lgach, kanaldan istalgan xabarni shu botga "
-        f"<b>forward</b> (yo'naltirish) qiling."
-    )
+    return f"🔒 Botdan foydalanish uchun {count}{kanallar} obuna bo'ling!"
 
 
-def mark_zayafka_done(user_id: int, channel_db_id: int) -> None:
-    _ZAYAFKA_DONE.setdefault(user_id, set()).add(channel_db_id)
+def mark_visited(user_id: int, channel_db_id: int) -> None:
+    _VISITED.setdefault(user_id, set()).add(channel_db_id)
 
 
-def has_zayafka_for_channel(user_id: int, channel_db_id: int) -> bool:
-    return channel_db_id in _ZAYAFKA_DONE.get(user_id, set())
+def has_visited_all(user_id: int, channels: list) -> bool:
+    """Barcha kanal tugmalari bosilganmi?"""
+    visited = _VISITED.get(user_id, set())
+    return all(ch.id in visited for ch in channels)
 
 
 def set_pass_cache(user_id: int) -> None:
@@ -102,7 +92,7 @@ class SubscriptionMiddleware(BaseMiddleware):
         tg_user = data.get("event_from_user")
         tg_id = tg_user.id if tg_user else db_user.telegram_id
 
-        # Adminlar to'siqsiz o'tadi
+        # Adminlar o'tadi
         if tg_id in getattr(settings, "ADMIN_IDS", []):
             return await handler(event, data)
 
@@ -116,56 +106,30 @@ class SubscriptionMiddleware(BaseMiddleware):
             ):
                 return await handler(event, data)
 
-        # 5 daqiqalik pass oynasi
+        # Pass cache aktiv bo'lsa — o'tkazib yuborish
         if time.time() - _PASS_CACHE.get(tg_id, 0) < PASS_TTL:
             return await handler(event, data)
 
-        bot: Bot = data["bot"]
-        to_show = await _channels_to_show(bot, tg_id)
-
-        if not to_show:
+        channels = await _load_active_channels()
+        if not channels:
             return await handler(event, data)
 
-        # ── Zayafka aniqlash: kanaldan forward qilingan xabar ────────────────
-        if isinstance(event, Message) and event.forward_origin:
-            if isinstance(event.forward_origin, MessageOriginChannel):
-                fwd_channel_id = event.forward_origin.chat.id
-                ch = await _get_required_channel(fwd_channel_id)
-                if ch:
-                    mark_zayafka_done(tg_id, ch.id)
-                    done = _ZAYAFKA_DONE.get(tg_id, set())
-                    still_needed = [c for c in to_show if c.id not in done]
-
-                    if still_needed:
-                        text = (
-                            f"✅ <b>{ch.title}</b> — zayafka qabul qilindi!\n\n"
-                            f"Yana {len(still_needed)} ta kanal qoldi 👇"
-                        )
-                    else:
-                        text = (
-                            f"✅ <b>{ch.title}</b> — zayafka qabul qilindi!\n\n"
-                            "Endi «✅ Tekshirish» tugmasini bosing!"
-                        )
-
-                    await event.answer(
-                        text,
-                        parse_mode="HTML",
-                        reply_markup=_sub_keyboard(to_show, done=done),
-                    )
-                    return
-        # ─────────────────────────────────────────────────────────────────────
+        # Barcha tugmalar oldin bosilgan bo'lsa — pass cacheni yangilab o'tkazish
+        if has_visited_all(tg_id, channels):
+            set_pass_cache(tg_id)
+            return await handler(event, data)
 
         # Obuna xabarini ko'rsatish
-        done = _ZAYAFKA_DONE.get(tg_id, set())
-        kb = _sub_keyboard(to_show, done=done)
-        text = _sub_text(len(to_show))
+        visited = _VISITED.get(tg_id, set())
+        kb = _sub_keyboard(channels, visited=visited)
+        text = _sub_text(len(channels))
 
         if isinstance(event, Message):
-            await event.answer(text, reply_markup=kb, parse_mode="HTML")
+            await event.answer(text, reply_markup=kb)
         elif isinstance(event, CallbackQuery):
             await event.answer("⛔ Avval kanallarga obuna bo'ling!", show_alert=True)
             try:
-                await event.message.answer(text, reply_markup=kb, parse_mode="HTML")
+                await event.message.answer(text, reply_markup=kb)
             except Exception:
                 pass
         return
@@ -175,57 +139,3 @@ class SubscriptionMiddleware(BaseMiddleware):
 def _load_active_channels():
     from apps.users.models import RequiredChannel
     return list(RequiredChannel.objects.filter(is_active=True))
-
-
-@sync_to_async
-def _get_required_channel(channel_tg_id: int):
-    """Telegram channel_id bo'yicha RequiredChannel qaytaradi yoki None."""
-    from apps.users.models import RequiredChannel
-    try:
-        return RequiredChannel.objects.get(channel_id=channel_tg_id, is_active=True)
-    except RequiredChannel.DoesNotExist:
-        return None
-
-
-async def _channels_to_show(bot: Bot, user_id: int) -> list:
-    """
-    Ko'rsatish uchun kanallar:
-    public (bot admin) — API tekshiruvi, left/kicked → ko'rsat.
-    private / exception → har doim ko'rsat.
-    """
-    channels = await _load_active_channels()
-    result = []
-    for ch in channels:
-        try:
-            member = await bot.get_chat_member(ch.channel_id, user_id)
-            if member.status in ("left", "kicked"):
-                result.append(ch)
-        except Exception:
-            result.append(ch)
-    return result
-
-
-async def _channels_still_blocking(bot: Bot, user_id: int) -> list:
-    """
-    Hali ruxsat bermayotgan kanallar.
-    Kanal o'tadi agar:
-      - API orqali obuna tasdiqlansa (public/bot admin)  YOKI
-      - Zayafka yuborilgan bo'lsa
-    """
-    channels = await _load_active_channels()
-    result = []
-    for ch in channels:
-        # 1. Zayafka tasdiqlanganligi
-        if has_zayafka_for_channel(user_id, ch.id):
-            continue
-
-        # 2. API orqali obuna tekshiruvi
-        try:
-            member = await bot.get_chat_member(ch.channel_id, user_id)
-            if member.status not in ("left", "kicked"):
-                continue  # Obuna tasdiqlandi ✓
-        except Exception:
-            pass  # Tekshirib bo'lmadi (private kanal)
-
-        result.append(ch)
-    return result

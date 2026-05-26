@@ -160,20 +160,18 @@ async def tx_delete_confirm_cb(callback: CallbackQuery, db_user: TelegramUser):
     deleted, _ = await Transaction.objects.filter(id=tx_id, user=db_user).adelete()
     await callback.answer("✅ O'chirildi!" if deleted else "❌ Topilmadi.", show_alert=False)
 
-    text, txs = await build_history_with_txs(db_user, limit=20)
-    kb = history_delete_keyboard(txs) if txs else None
+    text = await reports.build_history(db_user, limit=20)
     try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        await callback.message.edit_text(text, parse_mode="HTML")
     except Exception:
         pass
 
 
 @router.callback_query(F.data == "tx:del_no")
 async def tx_delete_cancel(callback: CallbackQuery, db_user: TelegramUser):
-    text, txs = await build_history_with_txs(db_user, limit=20)
-    kb = history_delete_keyboard(txs) if txs else None
+    text = await reports.build_history(db_user, limit=20)
     try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        await callback.message.edit_text(text, parse_mode="HTML")
     except Exception:
         pass
     await callback.answer()
