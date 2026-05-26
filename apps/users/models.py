@@ -37,6 +37,7 @@ class TelegramUser(models.Model):
     full_name = models.CharField(max_length=255, verbose_name="To'liq ism")
     username = models.CharField(max_length=255, null=True, blank=True, verbose_name="Username")
     is_active = models.BooleanField(default=True, verbose_name="Faol")
+    last_reminded_at = models.DateTimeField(null=True, blank=True, verbose_name="Oxirgi eslatma vaqti")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Qo'shilgan vaqt")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Yangilangan vaqt")
 

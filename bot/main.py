@@ -2,6 +2,7 @@
 Bot entry point — Aiogram dispatcher va router sozlash.
 """
 
+import asyncio
 import logging
 import os
 
@@ -21,6 +22,7 @@ from django.conf import settings
 from bot.handlers import admin, commands, menu, message, start, subscription, voice
 from bot.middlewares.auth import AuthMiddleware
 from bot.middlewares.subscription import SubscriptionMiddleware
+from bot.tasks.notifications import run_notification_loop
 
 logger = logging.getLogger("bot")
 
@@ -52,6 +54,8 @@ async def main():
     dp.include_router(menu.router)
     dp.include_router(voice.router)
     dp.include_router(message.router)
+
+    asyncio.create_task(run_notification_loop(bot))
 
     logger.info("Bot polling boshlandi...")
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

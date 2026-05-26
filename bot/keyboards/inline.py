@@ -66,3 +66,27 @@ def export_period_keyboard(fmt: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📅 Hammasi", callback_data=f"export_period:{fmt}:all"),
     )
     return builder.as_markup()
+
+
+def history_delete_keyboard(txs: list) -> InlineKeyboardMarkup:
+    """Har bir tranzaksiya uchun 🗑 #id tugmasi, 5 tadan bir qatorda."""
+    builder = InlineKeyboardBuilder()
+    row: list[InlineKeyboardButton] = []
+    for i, tx in enumerate(txs):
+        row.append(InlineKeyboardButton(
+            text=f"🗑 #{tx.id}",
+            callback_data=f"tx:del:{tx.id}",
+        ))
+        if len(row) == 5 or i == len(txs) - 1:
+            builder.row(*row)
+            row = []
+    return builder.as_markup()
+
+
+def tx_delete_confirm_keyboard(tx_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🗑 Ha, o'chirish", callback_data=f"tx:del_ok:{tx_id}"),
+        InlineKeyboardButton(text="↩️ Bekor", callback_data="tx:del_no"),
+    )
+    return builder.as_markup()

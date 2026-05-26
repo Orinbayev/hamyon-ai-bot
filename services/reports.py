@@ -261,16 +261,10 @@ def _categories(user: TelegramUser) -> str:
     return "\n".join(lines)
 
 
-def _history(user: TelegramUser, limit: int = 20) -> str:
-    txs = list(
-        Transaction.objects.filter(user=user)
-        .select_related("category")
-        .order_by("-transaction_date", "-created_at")[:limit]
-    )
+def _history_text(txs: list, limit: int = 20) -> str:
     if not txs:
         return f"📋 <b>Tarix</b>\n{SEP}\n\nHali hech narsa yozilmagan."
-
-    lines = [f"📋 <b>Oxirgi {limit} ta yozuv</b>", SEP]
+    lines = [f"📋 <b>Oxirgi {len(txs)} ta yozuv</b>  <i>(🗑 tugma — o'chirish)</i>", SEP]
     prev_date = None
     for t in txs:
         if t.transaction_date != prev_date:
@@ -291,6 +285,43 @@ def _history(user: TelegramUser, limit: int = 20) -> str:
     return "\n".join(lines)
 
 
+def _history(user: TelegramUser, limit: int = 20) -> str:
+    txs = list(
+        Transaction.objects.filter(user=user)
+        .select_related("category")
+        .order_by("-transaction_date", "-created_at")[:limit]
+    )
+    return _history_text(txs, limit)
+
+
+def _history_with_txs(user: TelegramUser, limit: int = 20) -> tuple:
+    txs = list(
+        Transaction.objects.filter(user=user)
+        .select_related("category")
+        .order_by("-transaction_date", "-created_at")[:limit]
+    )
+    return _history_text(txs, limit), txs
+
+
+def _period_stats(user: TelegramUser, start: date, end: date) -> dict:
+    qs = Transaction.objects.filter(user=user, transaction_date__range=(start, end))
+    income = qs.filter(type="income").aggregate(t=Sum("amount"))["t"] or Decimal("0")
+    expense = qs.filter(type="expense").aggregate(t=Sum("amount"))["t"] or Decimal("0")
+    cats = list(
+        qs.filter(type="expense")
+        .values("category__name")
+        .annotate(total=Sum("amount"))
+        .order_by("-total")[:3]
+    )
+    return {
+        "income": income,
+        "expense": expense,
+        "balance": income - expense,
+        "count": qs.count(),
+        "top_cats": cats,
+    }
+
+
 # ── Async public API ─────────────────────────────────────────────────────────
 
 build_today_report = sync_to_async(_today)
@@ -299,3 +330,5 @@ build_month_report = sync_to_async(_month)
 build_balance_report = sync_to_async(_balance)
 build_categories_report = sync_to_async(_categories)
 build_history = sync_to_async(_history)
+build_history_with_txs = sync_to_async(_history_with_txs)
+get_period_stats = sync_to_async(_period_stats)

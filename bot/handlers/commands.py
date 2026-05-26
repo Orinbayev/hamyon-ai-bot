@@ -18,9 +18,12 @@ from bot.keyboards.inline import (
     delete_confirm_keyboard,
     export_format_keyboard,
     export_period_keyboard,
+    history_delete_keyboard,
+    tx_delete_confirm_keyboard,
 )
 from services import export as export_service
 from services import reports
+from services.reports import build_history_with_txs
 
 logger = logging.getLogger("bot")
 router = Router(name="commands")
@@ -62,8 +65,9 @@ async def cmd_categories(message: Message, db_user: TelegramUser):
 
 @router.message(Command("history"))
 async def cmd_history(message: Message, db_user: TelegramUser):
-    text = await reports.build_history(db_user, limit=20)
-    await message.answer(text, parse_mode="HTML")
+    text, txs = await build_history_with_txs(db_user, limit=20)
+    kb = history_delete_keyboard(txs) if txs else None
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 # ── /delete ──────────────────────────────────────────────────────────────────
@@ -120,6 +124,61 @@ async def delete_confirm(callback: CallbackQuery, db_user: TelegramUser):
 @router.callback_query(F.data == "delete_cancel")
 async def delete_cancel(callback: CallbackQuery):
     await callback.message.edit_text("↩️ Bekor qilindi.")
+    await callback.answer()
+
+
+# ── Tarix inline o'chirish ────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("tx:del:"))
+async def tx_delete_ask(callback: CallbackQuery, db_user: TelegramUser):
+    tx_id = int(callback.data.split(":")[2])
+    tx = await Transaction.objects.filter(id=tx_id, user=db_user).select_related("category").afirst()
+    if not tx:
+        await callback.answer("❌ Yozuv topilmadi.", show_alert=True)
+        return
+
+    type_label = "💰 Kirim" if tx.type == "income" else "💸 Chiqim"
+    cat_name = tx.category.name if tx.category else "Boshqa"
+    amount_str = f"{float(tx.amount):,.0f}".replace(",", " ") + f" {tx.currency}"
+
+    text = (
+        f"🗑 <b>O'chirishni tasdiqlang</b>\n\n"
+        f"<code>#{tx.id}</code> — {cat_name}\n"
+        f"{type_label}:  {amount_str}\n"
+        f"📅 {tx.transaction_date.strftime('%d.%m.%Y')}"
+    )
+    if tx.note:
+        text += f"\n📝 {tx.note}"
+
+    await callback.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=tx_delete_confirm_keyboard(tx_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tx:del_ok:"))
+async def tx_delete_confirm_cb(callback: CallbackQuery, db_user: TelegramUser):
+    tx_id = int(callback.data.split(":")[2])
+    deleted, _ = await Transaction.objects.filter(id=tx_id, user=db_user).adelete()
+    await callback.answer("✅ O'chirildi!" if deleted else "❌ Topilmadi.", show_alert=False)
+
+    text, txs = await build_history_with_txs(db_user, limit=20)
+    kb = history_delete_keyboard(txs) if txs else None
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "tx:del_no")
+async def tx_delete_cancel(callback: CallbackQuery, db_user: TelegramUser):
+    text, txs = await build_history_with_txs(db_user, limit=20)
+    kb = history_delete_keyboard(txs) if txs else None
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass
     await callback.answer()
 
 
