@@ -20,6 +20,7 @@ from bot.middlewares.subscription import (
     _VISITED,
     _get_channel_by_tg_id,
     _load_active_channels,
+    _save_subscription_verified,
     _sub_keyboard,
     has_visited_all,
     mark_visited,
@@ -167,6 +168,7 @@ async def sub_check(callback: CallbackQuery, db_user: TelegramUser, bot: Bot) ->
         return
 
     set_pass_cache(user_id)
+    await _save_subscription_verified(user_id)
     await callback.answer("✅ Botdan foydalanishingiz mumkin!", show_alert=True)
     try:
         await callback.message.delete()

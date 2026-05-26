@@ -9,16 +9,26 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from apps.users.models import TelegramUser
-from bot.handlers.message import SEP, _build_preview, _build_success_reply, _save_transactions
-from bot.keyboards.inline import confirm_transactions_keyboard
+from bot.handlers.message import SEP, _build_preview, _build_success_reply, _save_transactions, _LAST_TX
+from bot.keyboards.inline import confirm_transactions_keyboard, tx_quick_actions_keyboard
 from services import gemini, voice as voice_service
 
 logger = logging.getLogger("bot")
 router = Router(name="voice")
 
+VOICE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
 
 @router.message(F.voice)
 async def handle_voice(message: Message, db_user: TelegramUser, state: FSMContext):
+    # Fayl hajmini tekshirish
+    if message.voice.file_size and message.voice.file_size > VOICE_MAX_BYTES:
+        await message.answer(
+            "⚠️ Ovoz fayli juda katta (maksimum 10MB).\n"
+            "Iltimos qisqaroq ovoz yuboring yoki matn orqali yozing."
+        )
+        return
+
     thinking_msg = await message.answer("🎤 Ovoz tahlil qilinmoqda...")
 
     try:
@@ -49,8 +59,11 @@ async def handle_voice(message: Message, db_user: TelegramUser, state: FSMContex
 
     if len(items) == 1:
         saved = await _save_transactions(db_user, items, raw_text)
+        if saved:
+            _LAST_TX[db_user.telegram_id] = [tx.id for tx in saved]
         reply = await _build_success_reply(db_user, items, saved)
-        await message.answer(reply, parse_mode="HTML")
+        kb = tx_quick_actions_keyboard(saved[0].id) if saved else None
+        await message.answer(reply, parse_mode="HTML", reply_markup=kb)
         return
 
     preview = _build_preview(items)

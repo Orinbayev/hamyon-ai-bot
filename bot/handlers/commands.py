@@ -1,6 +1,6 @@
 """
 Bot buyruqlari: /today, /week, /month, /balance, /categories,
-/history, /delete, /export
+/history, /delete, /undo, /export
 """
 
 import logging
@@ -12,12 +12,14 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from apps.transactions.models import Transaction
 from apps.users.models import TelegramUser
+from bot.handlers.message import _LAST_TX
 from bot.keyboards.inline import (
     clear_after_export_keyboard,
     clear_confirm_keyboard,
     delete_confirm_keyboard,
     export_format_keyboard,
     export_period_keyboard,
+    history_full_keyboard,
     tx_delete_confirm_keyboard,
 )
 from services import export as export_service
@@ -63,8 +65,47 @@ async def cmd_categories(message: Message, db_user: TelegramUser):
 
 @router.message(Command("history"))
 async def cmd_history(message: Message, db_user: TelegramUser):
-    text = await reports.build_history(db_user, limit=20)
-    await message.answer(text, parse_mode="HTML")
+    text, txs, page, total_pages = await reports.build_history_page(db_user, page=0)
+    kb = history_full_keyboard(txs, page, total_pages) if txs else None
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("hist:page:"))
+async def history_page_cb(callback: CallbackQuery, db_user: TelegramUser):
+    page = int(callback.data.split(":")[2])
+    text, txs, page, total_pages = await reports.build_history_page(db_user, page=page)
+    kb = history_full_keyboard(txs, page, total_pages) if txs else None
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "hist:noop")
+async def history_noop(callback: CallbackQuery):
+    await callback.answer()
+
+
+# ── /undo ─────────────────────────────────────────────────────────────────────
+
+@router.message(Command("undo"))
+async def cmd_undo(message: Message, db_user: TelegramUser):
+    tx_ids = _LAST_TX.get(db_user.telegram_id, [])
+    if not tx_ids:
+        await message.answer(
+            "⚠️ Bekor qilish uchun hech narsa topilmadi.\n\n"
+            "Faqat oxirgi kiritilgan yozuvni bekor qilish mumkin."
+        )
+        return
+    deleted, _ = await Transaction.objects.filter(id__in=tx_ids, user=db_user).adelete()
+    _LAST_TX.pop(db_user.telegram_id, None)
+    n = len(tx_ids)
+    await message.answer(
+        f"↩️ <b>{deleted} ta yozuv bekor qilindi</b>\n\n"
+        f"ID: {', '.join(f'#{i}' for i in tx_ids)}",
+        parse_mode="HTML",
+    )
 
 
 # ── /delete ──────────────────────────────────────────────────────────────────
@@ -128,7 +169,10 @@ async def delete_cancel(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("tx:del:"))
 async def tx_delete_ask(callback: CallbackQuery, db_user: TelegramUser):
-    tx_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    tx_id = int(parts[2])
+    back_page = int(parts[3]) if len(parts) > 3 else 0
+
     tx = await Transaction.objects.filter(id=tx_id, user=db_user).select_related("category").afirst()
     if not tx:
         await callback.answer("❌ Yozuv topilmadi.", show_alert=True)
@@ -149,29 +193,35 @@ async def tx_delete_ask(callback: CallbackQuery, db_user: TelegramUser):
 
     await callback.message.edit_text(
         text, parse_mode="HTML",
-        reply_markup=tx_delete_confirm_keyboard(tx_id),
+        reply_markup=tx_delete_confirm_keyboard(tx_id, back_page),
     )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("tx:del_ok:"))
 async def tx_delete_confirm_cb(callback: CallbackQuery, db_user: TelegramUser):
-    tx_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    tx_id = int(parts[2])
+    back_page = int(parts[3]) if len(parts) > 3 else 0
+
     deleted, _ = await Transaction.objects.filter(id=tx_id, user=db_user).adelete()
     await callback.answer("✅ O'chirildi!" if deleted else "❌ Topilmadi.", show_alert=False)
 
-    text = await reports.build_history(db_user, limit=20)
+    # Tarixga qaytish
+    text, txs, page, total_pages = await reports.build_history_page(db_user, page=back_page)
+    kb = history_full_keyboard(txs, page, total_pages) if txs else None
     try:
-        await callback.message.edit_text(text, parse_mode="HTML")
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     except Exception:
         pass
 
 
 @router.callback_query(F.data == "tx:del_no")
 async def tx_delete_cancel(callback: CallbackQuery, db_user: TelegramUser):
-    text = await reports.build_history(db_user, limit=20)
+    text, txs, page, total_pages = await reports.build_history_page(db_user, page=0)
+    kb = history_full_keyboard(txs, page, total_pages) if txs else None
     try:
-        await callback.message.edit_text(text, parse_mode="HTML")
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     except Exception:
         pass
     await callback.answer()

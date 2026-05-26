@@ -53,6 +53,12 @@ async def cmd_help(message: Message):
         f"✏️ <b>Boshqarish</b>\n\n"
         f"/delete — oxirgi yozuvni o'chirish\n"
         f"/delete 42 — #42 raqamli yozuvni o'chirish\n"
-        f"/clear — barcha tarixni tozalash"
+        f"/undo — eng oxirgi kiritilgan yozuvni bekor qilish\n"
+        f"/clear — barcha tarixni tozalash\n\n"
+        f"{SEP}\n"
+        f"💡 <b>Maslahatlar</b>\n\n"
+        f"Izoh qo'shish: <code>50k taxi // ish uchun</code>\n"
+        f"Yozuv saqlanganidan keyin <b>✏️ Kategoriya</b> tugmasi chiqadi\n"
+        f"— noto'g'ri kategoriyani o'sha yerda o'zgartiring."
     )
     await message.answer(text, parse_mode="HTML", reply_markup=main_menu())

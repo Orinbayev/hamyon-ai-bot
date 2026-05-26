@@ -19,7 +19,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from django.conf import settings
 
-from bot.handlers import admin, commands, menu, message, start, subscription, voice
+from bot.handlers import admin, commands, edit, menu, message, start, subscription, voice
 from bot.middlewares.auth import AuthMiddleware
 from bot.middlewares.subscription import SubscriptionMiddleware
 from bot.tasks.notifications import run_notification_loop
@@ -52,6 +52,7 @@ async def main():
     dp.include_router(start.router)
     dp.include_router(commands.router)
     dp.include_router(menu.router)
+    dp.include_router(edit.router)
     dp.include_router(voice.router)
     dp.include_router(message.router)
 

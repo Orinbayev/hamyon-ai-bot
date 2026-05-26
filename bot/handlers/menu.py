@@ -9,7 +9,7 @@ from aiogram.types import Message
 
 from apps.users.models import TelegramUser
 from apps.transactions.models import Transaction
-from bot.keyboards.inline import clear_confirm_keyboard, export_format_keyboard
+from bot.keyboards.inline import clear_confirm_keyboard, export_format_keyboard, history_full_keyboard
 from bot.keyboards.reply import main_menu
 from services import reports
 
@@ -55,8 +55,9 @@ async def menu_categories(message: Message, db_user: TelegramUser):
 
 @router.message(F.text == "📋 Tarix")
 async def menu_history(message: Message, db_user: TelegramUser):
-    text = await reports.build_history(db_user, limit=20)
-    await _send_report(message, text)
+    text, txs, page, total_pages = await reports.build_history_page(db_user, page=0)
+    kb = history_full_keyboard(txs, page, total_pages) if txs else None
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.message(F.text == "📤 Eksport")

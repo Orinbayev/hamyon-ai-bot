@@ -1,9 +1,15 @@
 """
 Matnli xabarlarni qayta ishlash — Gemini AI orqali tranzaksiyalarga aylantirish.
+
+Yangi imkoniyatlar:
+  - "//" orqali izoh qo'shish: "50k taxi // ish uchun"
+  - Saqlanganidan keyin [✏️ Kategoriya | ↩️ Bekor] tugmalari
+  - Kategoriya o'zgartirish
+  - Duplicate tekshiruvi
 """
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from aiogram import F, Router
@@ -11,10 +17,16 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from asgiref.sync import sync_to_async
 from django.db.models import Sum
+from django.utils import timezone
 
 from apps.transactions.models import Category, Transaction
 from apps.users.models import TelegramUser
-from bot.keyboards.inline import confirm_transactions_keyboard
+from bot.keyboards.inline import (
+    CATEGORY_LIST,
+    category_select_keyboard,
+    confirm_transactions_keyboard,
+    tx_quick_actions_keyboard,
+)
 from bot.keyboards.reply import MENU_BUTTONS, main_menu
 from services import gemini
 
@@ -22,6 +34,10 @@ logger = logging.getLogger("bot")
 router = Router(name="message")
 
 SEP = "━" * 15
+
+# Oxirgi saqlangan tranzaksiyalar: {user_telegram_id: [tx_id, ...]}
+# /undo uchun ishlatiladi
+_LAST_TX: dict[int, list[int]] = {}
 
 CATEGORY_ICONS = {
     "ovqat": "🍽", "taxi": "🚕", "transport": "🚌",
@@ -104,25 +120,50 @@ def _build_preview(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def _get_or_create_category(user: TelegramUser, slug: str, t_type: str) -> Category:
+async def _get_or_create_category(user: TelegramUser, slug: str) -> Category:
+    """Kategoriya olish yoki yaratish. "both" type ishlatiladi — type nomuvofiqligini oldini oladi."""
     name = CATEGORY_NAMES.get(slug, "Boshqa")
     icon = CATEGORY_ICONS.get(slug, "📌")
+    # Avval standart (default) kategoriyani qidirish
     cat = await Category.objects.filter(slug=slug, is_default=True).afirst()
     if cat:
         return cat
+    # Foydalanuvchi kategoriyasini yaratish
     cat, _ = await Category.objects.aget_or_create(
         slug=slug, user=user,
-        defaults={"name": name, "icon": icon, "type": t_type},
+        defaults={"name": name, "icon": icon, "type": "both"},
     )
     return cat
 
 
-async def _save_transactions(user: TelegramUser, items: list[dict], raw_text: str) -> list[Transaction]:
+async def _save_transactions(
+    user: TelegramUser,
+    items: list[dict],
+    raw_text: str,
+    extra_note: str | None = None,
+) -> list[Transaction]:
     saved = []
     for item in items:
         try:
-            cat = await _get_or_create_category(user, item.get("category", "boshqa"), item["type"])
+            cat = await _get_or_create_category(user, item.get("category", "boshqa"))
             t_date = date.fromisoformat(item["date"]) if item.get("date") else date.today()
+            note = extra_note if extra_note else item.get("note", "")
+
+            # Duplicate tekshiruvi: oxirgi 60 sekund ichida bir xil yozuv
+            recent = timezone.now() - timedelta(seconds=60)
+            existing = await Transaction.objects.filter(
+                user=user,
+                type=item["type"],
+                amount=item["amount"],
+                currency=item.get("currency", "UZS"),
+                transaction_date=t_date,
+                category=cat,
+                created_at__gte=recent,
+            ).afirst()
+            if existing:
+                saved.append(existing)
+                continue
+
             tx = await Transaction.objects.acreate(
                 user=user,
                 type=item["type"],
@@ -130,7 +171,7 @@ async def _save_transactions(user: TelegramUser, items: list[dict], raw_text: st
                 currency=item.get("currency", "UZS"),
                 category=cat,
                 payment_method=item.get("payment_method", "cash"),
-                note=item.get("note", ""),
+                note=note,
                 transaction_date=t_date,
                 raw_text=raw_text,
             )
@@ -223,9 +264,20 @@ async def _build_success_reply(user: TelegramUser, items: list[dict], saved: lis
     return "\n".join(lines)
 
 
+# ── Asosiy handler ───────────────────────────────────────────────────────────
+
 @router.message(F.text & ~F.text.startswith("/") & ~F.text.in_(MENU_BUTTONS))
 async def handle_text(message: Message, db_user: TelegramUser, state: FSMContext):
-    text = message.text.strip()
+    raw = message.text.strip()
+
+    # "//" orqali izoh ajratish: "50k taxi // ish uchun"
+    extra_note: str | None = None
+    if "//" in raw:
+        text_part, _, note_part = raw.partition("//")
+        text = text_part.strip()
+        extra_note = note_part.strip() or None
+    else:
+        text = raw
 
     thinking_msg = await message.answer("⏳ Tahlil qilinmoqda...")
 
@@ -251,20 +303,25 @@ async def handle_text(message: Message, db_user: TelegramUser, state: FSMContext
             "• kirim yoki chiqim\n"
             "• kategoriya\n\n"
             "Misol:\n"
-            "<i>\"Taxi uchun 25 ming ketdi\"</i>",
+            "<i>\"Taxi uchun 25 ming ketdi\"</i>\n\n"
+            "Izoh qo'shish uchun <code>//</code> ishlating:\n"
+            "<i>\"50k taxi // ish uchun\"</i>",
             parse_mode="HTML",
             reply_markup=main_menu(),
         )
         return
 
     if len(items) == 1:
-        saved = await _save_transactions(db_user, items, text)
+        saved = await _save_transactions(db_user, items, raw, extra_note)
+        if saved:
+            _LAST_TX[db_user.telegram_id] = [tx.id for tx in saved]
         reply = await _build_success_reply(db_user, items, saved)
-        await message.answer(reply, parse_mode="HTML", reply_markup=main_menu())
+        kb = tx_quick_actions_keyboard(saved[0].id) if saved else main_menu()
+        await message.answer(reply, parse_mode="HTML", reply_markup=kb)
         return
 
     preview = _build_preview(items)
-    await state.update_data(pending_items=items, raw_text=text)
+    await state.update_data(pending_items=items, raw_text=raw, extra_note=extra_note)
 
     await message.answer(
         f"📋 <b>{len(items)} ta tranzaksiya topildi:</b>\n\n"
@@ -281,6 +338,7 @@ async def confirm_save(callback: CallbackQuery, db_user: TelegramUser, state: FS
     data = await state.get_data()
     items = data.get("pending_items", [])
     raw_text = data.get("raw_text", "")
+    extra_note = data.get("extra_note")
 
     await state.clear()
 
@@ -288,9 +346,11 @@ async def confirm_save(callback: CallbackQuery, db_user: TelegramUser, state: FS
         await callback.answer("Saqlash uchun ma'lumot topilmadi.", show_alert=True)
         return
 
-    saved = await _save_transactions(db_user, items, raw_text)
-    reply = await _build_success_reply(db_user, items, saved)
+    saved = await _save_transactions(db_user, items, raw_text, extra_note)
+    if saved:
+        _LAST_TX[db_user.telegram_id] = [tx.id for tx in saved]
 
+    reply = await _build_success_reply(db_user, items, saved)
     await callback.message.edit_text(reply, parse_mode="HTML")
     await callback.answer()
 
@@ -300,3 +360,74 @@ async def cancel_save(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("❌ Bekor qilindi")
     await callback.answer()
+
+
+# ── Inline undo (tezkor bekor qilish) ───────────────────────────────────────
+
+@router.callback_query(F.data.startswith("tx:undo:"))
+async def tx_undo_inline(callback: CallbackQuery, db_user: TelegramUser) -> None:
+    try:
+        tx_id = int(callback.data.split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Xato.", show_alert=True)
+        return
+    deleted, _ = await Transaction.objects.filter(id=tx_id, user=db_user).adelete()
+    if deleted:
+        _LAST_TX.pop(db_user.telegram_id, None)
+        try:
+            await callback.message.edit_text("↩️ Yozuv bekor qilindi.")
+        except Exception:
+            pass
+    else:
+        await callback.answer("❌ Yozuv topilmadi yoki allaqachon o'chirilgan.", show_alert=True)
+        return
+    await callback.answer()
+
+
+# ── Kategoriya o'zgartirish ──────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("tx:cat_change:"))
+async def tx_cat_change(callback: CallbackQuery, db_user: TelegramUser) -> None:
+    parts = callback.data.split(":")
+    tx_id = int(parts[2])
+    back_page = int(parts[3]) if len(parts) > 3 else 0
+
+    tx = await Transaction.objects.filter(id=tx_id, user=db_user).afirst()
+    if not tx:
+        await callback.answer("❌ Yozuv topilmadi.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "📌 <b>Kategoriyani tanlang:</b>",
+        parse_mode="HTML",
+        reply_markup=category_select_keyboard(tx_id, back_page),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tx:cat_set:"))
+async def tx_cat_set(callback: CallbackQuery, db_user: TelegramUser) -> None:
+    parts = callback.data.split(":")
+    tx_id = int(parts[2])
+    slug = parts[3]
+    back_page = int(parts[4]) if len(parts) > 4 else 0
+
+    tx = await Transaction.objects.filter(id=tx_id, user=db_user).select_related("category").afirst()
+    if not tx:
+        await callback.answer("❌ Yozuv topilmadi.", show_alert=True)
+        return
+
+    cat = await _get_or_create_category(db_user, slug)
+    # aupdate ishlatiladi — auto_now field uchun xavfsiz
+    await Transaction.objects.filter(id=tx_id, user=db_user).aupdate(category=cat)
+
+    from bot.keyboards.inline import tx_detail_keyboard as _tx_detail_kb
+    icon = CATEGORY_ICONS.get(slug, "📌")
+    name = CATEGORY_NAMES.get(slug, "Boshqa")
+    await callback.message.edit_text(
+        f"✅ Kategoriya o'zgartirildi:\n\n"
+        f"{icon} <b>{name}</b>\n\n"
+        f"<code>#{tx.id}</code> — {_fmt(tx.amount, tx.currency)}",
+        parse_mode="HTML",
+        reply_markup=_tx_detail_kb(tx_id, back_page),
+    )
+    await callback.answer("✅ Saqlandi!")

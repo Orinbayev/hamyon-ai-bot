@@ -10,6 +10,7 @@ Flow:
 
 import logging
 import time
+from datetime import timedelta
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
@@ -22,6 +23,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from asgiref.sync import sync_to_async
 from django.conf import settings
+from django.utils import timezone
 
 logger = logging.getLogger("bot")
 
@@ -34,7 +36,8 @@ _VISITED: dict[int, set[int]] = {}
 
 # 5 daqiqa pass: {user_id: timestamp}
 _PASS_CACHE: dict[int, float] = {}
-PASS_TTL = 300
+PASS_TTL = 300           # 5 daqiqa — xotirada
+DB_PASS_DAYS = 7        # 7 kun — bazada saqlanadi
 
 # Obuna xabarining joylashuvi: {user_id: (chat_id, message_id)}
 _SUB_MESSAGES: dict[int, tuple[int, int]] = {}
@@ -95,6 +98,26 @@ def set_pass_cache(user_id: int) -> None:
     _PASS_CACHE[user_id] = time.time()
 
 
+@sync_to_async
+def _save_subscription_verified(tg_id: int) -> None:
+    """Obuna tasdiqlangan vaqtini bazaga saqlash (7 kunlik persistent pass)."""
+    from apps.users.models import TelegramUser
+    TelegramUser.objects.filter(telegram_id=tg_id).update(
+        subscription_verified_at=timezone.now()
+    )
+
+
+@sync_to_async
+def _check_db_subscription(tg_id: int) -> bool:
+    """Bazadan obuna tekshiruvi — 7 kundan kam o'tgan bo'lsa True."""
+    from apps.users.models import TelegramUser
+    cutoff = timezone.now() - timedelta(days=DB_PASS_DAYS)
+    return TelegramUser.objects.filter(
+        telegram_id=tg_id,
+        subscription_verified_at__gte=cutoff,
+    ).exists()
+
+
 class SubscriptionMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -124,8 +147,13 @@ class SubscriptionMiddleware(BaseMiddleware):
             ):
                 return await handler(event, data)
 
-        # Pass cache aktiv bo'lsa — o'tkazib yuborish
+        # Xotiradagi pass cache (5 daqiqa)
         if time.time() - _PASS_CACHE.get(tg_id, 0) < PASS_TTL:
+            return await handler(event, data)
+
+        # Bazadagi persistent pass (7 kun) — bot restart dan keyin ham ishlaydi
+        if await _check_db_subscription(tg_id):
+            set_pass_cache(tg_id)  # Xotiraga ham yozib qo'yish
             return await handler(event, data)
 
         channels = await _load_active_channels()

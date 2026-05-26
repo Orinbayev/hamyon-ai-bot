@@ -304,6 +304,32 @@ def _history_with_txs(user: TelegramUser, limit: int = 20) -> tuple:
     return _history_text(txs, limit), txs
 
 
+def _history_page(user: TelegramUser, page: int = 0, page_size: int = 10) -> tuple:
+    """
+    Sahifalangan tarix.
+    Returns (header_text, txs, current_page, total_pages)
+    """
+    total = Transaction.objects.filter(user=user).count()
+    if total == 0:
+        return f"📋 <b>Tarix</b>\n{SEP}\n\nHali hech narsa yozilmagan.", [], 0, 1
+
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+
+    offset = page * page_size
+    txs = list(
+        Transaction.objects.filter(user=user)
+        .select_related("category")
+        .order_by("-transaction_date", "-created_at")[offset: offset + page_size]
+    )
+
+    text = (
+        f"📋 <b>Tarix</b>  <i>({total} ta jami)</i>\n"
+        f"Har bir yozuvni bosib tahrirlash yoki o'chirish mumkin."
+    )
+    return text, txs, page, total_pages
+
+
 def _period_stats(user: TelegramUser, start: date, end: date) -> dict:
     qs = Transaction.objects.filter(user=user, transaction_date__range=(start, end))
     income = qs.filter(type="income").aggregate(t=Sum("amount"))["t"] or Decimal("0")
@@ -332,4 +358,5 @@ build_balance_report = sync_to_async(_balance)
 build_categories_report = sync_to_async(_categories)
 build_history = sync_to_async(_history)
 build_history_with_txs = sync_to_async(_history_with_txs)
+build_history_page = sync_to_async(_history_page)  # returns (text, txs, page, total_pages)
 get_period_stats = sync_to_async(_period_stats)
