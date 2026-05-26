@@ -18,8 +18,9 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from django.conf import settings
 
-from bot.handlers import admin, commands, menu, message, start, voice
+from bot.handlers import admin, commands, menu, message, start, subscription, voice
 from bot.middlewares.auth import AuthMiddleware
+from bot.middlewares.subscription import SubscriptionMiddleware
 
 logger = logging.getLogger("bot")
 
@@ -31,9 +32,11 @@ async def main():
     )
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Middleware — message va callback_query uchun
+    # Middleware — tartibi muhim: Auth → Subscription
     dp.message.middleware(AuthMiddleware())
     dp.callback_query.middleware(AuthMiddleware())
+    dp.message.middleware(SubscriptionMiddleware())
+    dp.callback_query.middleware(SubscriptionMiddleware())
 
     # Routerlar tartibi muhim:
     # 1. admin   — /admin va adm:* callbacks (oldin, cheklov bilan)
@@ -43,6 +46,7 @@ async def main():
     # 5. voice  — ovozli xabarlar
     # 6. message — matnli xabarlar (AI tahlil, eng oxirgi)
     dp.include_router(admin.router)
+    dp.include_router(subscription.router)
     dp.include_router(start.router)
     dp.include_router(commands.router)
     dp.include_router(menu.router)

@@ -3,7 +3,16 @@ from django.db.models import Count, DecimalField, Q, Sum, Value
 from django.db.models.functions import Coalesce
 
 from apps.transactions.models import Transaction
-from .models import TelegramUser
+from .models import RequiredChannel, TelegramUser
+
+
+@admin.register(RequiredChannel)
+class RequiredChannelAdmin(admin.ModelAdmin):
+    list_display = ("title", "channel_id", "username", "is_active", "created_at")
+    list_filter = ("is_active",)
+    search_fields = ("title", "username", "channel_id")
+    list_editable = ("is_active",)
+    readonly_fields = ("created_at",)
 
 
 class TransactionInline(admin.TabularInline):

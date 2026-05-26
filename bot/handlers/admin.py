@@ -18,6 +18,13 @@ Callback patterns:
   adm:broadcast_ok   — yuborishni tasdiqlash
   adm:about          — bot haqida
   adm:gemini         — Gemini token holati
+  adm:channels       — majburiy kanallar ro'yxati
+  adm:ch_add         — kanal qo'shish (tur tanlash)
+  adm:ch_type:pub    — public kanal qo'shish (@username)
+  adm:ch_type:priv   — shaxsiy kanal qo'shish (ID + invite)
+  adm:ch_del:{id}    — kanal o'chirish tasdiqlash
+  adm:ch_del_ok:{id} — kanal o'chirishni tasdiqlash
+  adm:ch_tog:{id}    — kanal faol/nofaol almashtirish
 """
 
 import asyncio
@@ -43,7 +50,7 @@ from django.db.models import Count, DecimalField, Q, Sum, Value
 from django.db.models.functions import Coalesce
 
 from apps.transactions.models import Transaction
-from apps.users.models import TelegramUser
+from apps.users.models import RequiredChannel, TelegramUser
 from services import export as export_service
 from services.token_tracker import tracker as gemini_tracker
 
@@ -57,6 +64,12 @@ USERS_PER_PAGE = 10
 class AdminState(StatesGroup):
     waiting_broadcast_text = State()
     confirm_broadcast = State()
+
+
+class ChannelAddState(StatesGroup):
+    waiting_username = State()    # public: @username
+    waiting_channel_id = State()  # private: -100xxxxxxxxxx
+    waiting_invite_link = State() # private: https://t.me/+xxxxxx
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -109,6 +122,9 @@ def _main_kb() -> InlineKeyboardMarkup:
     b.row(
         InlineKeyboardButton(text="📢 Xabar yuborish", callback_data="adm:broadcast"),
         InlineKeyboardButton(text="🤖 Gemini", callback_data="adm:gemini"),
+    )
+    b.row(
+        InlineKeyboardButton(text="📡 Majburiy kanallar", callback_data="adm:channels"),
     )
     return b.as_markup()
 
@@ -712,4 +728,278 @@ async def adm_gemini(callback: CallbackQuery) -> None:
     b.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="adm:menu"))
     await _safe_edit(callback, text, parse_mode="HTML", reply_markup=b.as_markup())
     await callback.answer()
-#TEST uchun yozyapman!
+
+
+# ── 📡 Majburiy kanallar ───────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "adm:channels")
+async def adm_channels(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    text, kb = await _fetch_channels_list()
+    await _safe_edit(callback, text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+@sync_to_async
+def _fetch_channels_list() -> tuple[str, InlineKeyboardMarkup]:
+    channels = list(RequiredChannel.objects.all())
+    b = InlineKeyboardBuilder()
+
+    if not channels:
+        text = (
+            f"📡 <b>Majburiy kanallar</b>\n{SEP}\n\n"
+            "Hozircha hech qanday majburiy kanal yo'q.\n\n"
+            "<i>Kanal qo'shsangiz, foydalanuvchilar botdan foydalanishdan\n"
+            "oldin o'sha kanallarga obuna bo'lishi shart bo'ladi.</i>"
+        )
+    else:
+        lines = [f"📡 <b>Majburiy kanallar</b>  ({len(channels)} ta)\n{SEP}\n"]
+        for i, ch in enumerate(channels, 1):
+            tag = f"@{ch.username}" if ch.username else f"ID: {ch.channel_id}"
+            status = "✅ Faol" if ch.is_active else "⏸ To'xtatilgan"
+            lines.append(f"{i}. <b>{ch.title}</b>\n   {tag}  •  {status}")
+        text = "\n".join(lines)
+        for ch in channels:
+            tog_icon = "⏸" if ch.is_active else "▶️"
+            b.row(
+                InlineKeyboardButton(
+                    text=f"{'✅' if ch.is_active else '⏸'} {ch.title[:22]}",
+                    callback_data=f"adm:ch_tog:{ch.id}",
+                ),
+                InlineKeyboardButton(text="🗑", callback_data=f"adm:ch_del:{ch.id}"),
+            )
+
+    b.row(
+        InlineKeyboardButton(text="🌐 Public kanal qo'shish", callback_data="adm:ch_type:pub"),
+        InlineKeyboardButton(text="🔒 Private kanal", callback_data="adm:ch_type:priv"),
+    )
+    b.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="adm:menu"))
+    return text, b.as_markup()
+
+
+# ── Kanal qo'shish: public (@username) ────────────────────────────────────────
+
+@router.callback_query(F.data == "adm:ch_type:pub")
+async def adm_ch_add_pub(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        return
+    await state.set_state(ChannelAddState.waiting_username)
+    await _safe_edit(
+        callback,
+        f"🌐 <b>Public kanal qo'shish</b>\n{SEP}\n\n"
+        "Kanalning <b>@username</b> ini yuboring.\n\n"
+        "<b>Misol:</b> <code>@mening_kanalim</code>\n\n"
+        "⚠️ Bot kanalda <b>admin</b> bo'lishi kerak.",
+        parse_mode="HTML",
+        reply_markup=_back_kb("adm:channels"),
+    )
+    await callback.answer()
+
+
+@router.message(ChannelAddState.waiting_username)
+async def adm_ch_receive_username(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        return
+    username = (message.text or "").strip().lstrip("@")
+    if not username:
+        await message.answer("⚠️ @username kiriting.")
+        return
+
+    bot: Bot = message.bot
+    wait_msg = await message.answer("⏳ Kanal tekshirilmoqda...")
+    try:
+        chat = await bot.get_chat(f"@{username}")
+    except Exception as e:
+        await wait_msg.edit_text(
+            f"❌ Kanal topilmadi: <code>{e}</code>\n\n"
+            "Bot kanalda admin bo'lishi va kanal public bo'lishi kerak.",
+            parse_mode="HTML",
+        )
+        return
+
+    if chat.type not in ("channel", "supergroup"):
+        await wait_msg.edit_text("❌ Bu kanal yoki guruh emas.")
+        return
+
+    await state.clear()
+    ch, created = await RequiredChannel.objects.aupdate_or_create(
+        channel_id=chat.id,
+        defaults={
+            "username": username,
+            "title": chat.title or f"@{username}",
+            "invite_link": "",
+            "is_active": True,
+        },
+    )
+    action = "qo'shildi ✅" if created else "yangilandi 🔄"
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📡 Kanallar ro'yxati", callback_data="adm:channels"))
+    b.row(InlineKeyboardButton(text="🏠 Admin panel", callback_data="adm:menu"))
+    await wait_msg.edit_text(
+        f"📡 <b>Kanal {action}</b>\n{SEP}\n\n"
+        f"📛 Nomi:     <b>{ch.title}</b>\n"
+        f"🔗 Username: @{ch.username}\n"
+        f"🆔 ID:       <code>{ch.channel_id}</code>",
+        parse_mode="HTML",
+        reply_markup=b.as_markup(),
+    )
+
+
+# ── Kanal qo'shish: private (ID + invite link) ─────────────────────────────────
+
+@router.callback_query(F.data == "adm:ch_type:priv")
+async def adm_ch_add_priv(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        return
+    await state.set_state(ChannelAddState.waiting_channel_id)
+    await _safe_edit(
+        callback,
+        f"🔒 <b>Private kanal qo'shish</b>\n{SEP}\n\n"
+        "Kanalning <b>ID</b> sini yuboring.\n\n"
+        "<b>ID ni qanday topish:</b>\n"
+        "1. Botni kanalga admin qo'shing\n"
+        "2. Kanalga istalgan xabar yuboring\n"
+        "3. @userinfobot ga forward qiling — ID ko'rinadi\n\n"
+        "<b>Misol:</b> <code>-1001234567890</code>",
+        parse_mode="HTML",
+        reply_markup=_back_kb("adm:channels"),
+    )
+    await callback.answer()
+
+
+@router.message(ChannelAddState.waiting_channel_id)
+async def adm_ch_receive_id(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        return
+    raw = (message.text or "").strip()
+    if not raw.lstrip("-").isdigit():
+        await message.answer("❌ Faqat raqam kiriting. Misol: <code>-1001234567890</code>", parse_mode="HTML")
+        return
+
+    channel_id = int(raw)
+    bot: Bot = message.bot
+    wait_msg = await message.answer("⏳ Kanal tekshirilmoqda...")
+    try:
+        chat = await bot.get_chat(channel_id)
+        title = chat.title or str(channel_id)
+    except Exception as e:
+        title = None
+        await wait_msg.edit_text(
+            f"⚠️ Kanal topilmadi: <code>{e}</code>\n\n"
+            "Davom etish uchun invite link ni yuboring:",
+            parse_mode="HTML",
+        )
+
+    if title:
+        await wait_msg.edit_text(
+            f"✅ Kanal topildi: <b>{title}</b>\n\n"
+            "Endi kanal <b>invite havolasini</b> yuboring.\n"
+            "<b>Misol:</b> <code>https://t.me/+xxxxxxxxxxxxxx</code>",
+            parse_mode="HTML",
+        )
+
+    await state.update_data(channel_id=channel_id, title=title or str(channel_id))
+    await state.set_state(ChannelAddState.waiting_invite_link)
+
+
+@router.message(ChannelAddState.waiting_invite_link)
+async def adm_ch_receive_invite(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        return
+    invite = (message.text or "").strip()
+    if not invite.startswith("https://t.me/"):
+        await message.answer(
+            "❌ Noto'g'ri havola. Misol: <code>https://t.me/+xxxxxxxxxxxxxx</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    data = await state.get_data()
+    channel_id = data["channel_id"]
+    title = data["title"]
+    await state.clear()
+
+    ch, created = await RequiredChannel.objects.aupdate_or_create(
+        channel_id=channel_id,
+        defaults={
+            "username": "",
+            "title": title,
+            "invite_link": invite,
+            "is_active": True,
+        },
+    )
+    action = "qo'shildi ✅" if created else "yangilandi 🔄"
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📡 Kanallar ro'yxati", callback_data="adm:channels"))
+    b.row(InlineKeyboardButton(text="🏠 Admin panel", callback_data="adm:menu"))
+    await message.answer(
+        f"📡 <b>Kanal {action}</b>\n{SEP}\n\n"
+        f"📛 Nomi:  <b>{ch.title}</b>\n"
+        f"🆔 ID:    <code>{ch.channel_id}</code>\n"
+        f"🔗 Link:  {ch.invite_link}",
+        parse_mode="HTML",
+        reply_markup=b.as_markup(),
+    )
+
+
+# ── Kanal toggle (faol/nofaol) ─────────────────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^adm:ch_tog:\d+$"))
+async def adm_ch_toggle(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        return
+    ch_id = int(callback.data.split(":")[2])
+    ch = await RequiredChannel.objects.aget(id=ch_id)
+    ch.is_active = not ch.is_active
+    await ch.asave(update_fields=["is_active"])
+    status = "faollashtirildi ✅" if ch.is_active else "to'xtatildi ⏸"
+    await callback.answer(f"{ch.title} {status}", show_alert=True)
+    text, kb = await _fetch_channels_list()
+    await _safe_edit(callback, text, parse_mode="HTML", reply_markup=kb)
+
+
+# ── Kanal o'chirish ────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^adm:ch_del:\d+$"))
+async def adm_ch_del_ask(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        return
+    ch_id = int(callback.data.split(":")[2])
+    try:
+        ch = await RequiredChannel.objects.aget(id=ch_id)
+    except RequiredChannel.DoesNotExist:
+        await callback.answer("❌ Topilmadi", show_alert=True)
+        return
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="🗑 Ha, o'chirish", callback_data=f"adm:ch_del_ok:{ch_id}"),
+        InlineKeyboardButton(text="❌ Bekor", callback_data="adm:channels"),
+    )
+    await _safe_edit(
+        callback,
+        f"⚠️ <b>Kanalni o'chirish</b>\n{SEP}\n\n"
+        f"<b>{ch.title}</b> kanalini majburiy obunalar ro'yxatidan\n"
+        "o'chirmoqchimisiz?\n\n"
+        "<i>Foydalanuvchilar endi bu kanalga obuna bo'lishi shart bo'lmaydi.</i>",
+        parse_mode="HTML",
+        reply_markup=b.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^adm:ch_del_ok:\d+$"))
+async def adm_ch_del_confirm(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        return
+    ch_id = int(callback.data.split(":")[2])
+    try:
+        ch = await RequiredChannel.objects.aget(id=ch_id)
+        title = ch.title
+        await ch.adelete()
+        await callback.answer(f"✅ «{title}» o'chirildi", show_alert=True)
+    except RequiredChannel.DoesNotExist:
+        await callback.answer("❌ Topilmadi", show_alert=True)
+    text, kb = await _fetch_channels_list()
+    await _safe_edit(callback, text, parse_mode="HTML", reply_markup=kb)
