@@ -1,21 +1,45 @@
 """
 SubscriptionMiddleware — majburiy kanal obunasini tekshiradi.
-AuthMiddleware dan KEYIN ishga tushirilishi kerak.
+AuthMiddleware dan KEYIN ro'yxatdan o'tishi kerak.
 """
 
 import logging
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware, Bot
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    Message,
+    TelegramObject,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import InlineKeyboardButton
 from asgiref.sync import sync_to_async
 from django.conf import settings
 
 logger = logging.getLogger("bot")
 
 SUB_CHECK_CB = "sub:check"
+
+# Bir sessiyada tekshiruvdan o'tgan foydalanuvchilar (restart bo'lsa tozalanadi)
+_PASSED_USERS: set[int] = set()
+
+NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+
+def _sub_keyboard(channels: list) -> Any:
+    b = InlineKeyboardBuilder()
+    for i, ch in enumerate(channels):
+        num = NUMS[i] if i < len(NUMS) else f"{i + 1}."
+        b.row(InlineKeyboardButton(text=f"{num} Obuna bo'lish", url=ch.link))
+    b.row(InlineKeyboardButton(text="✅ Tekshirish", callback_data=SUB_CHECK_CB))
+    return b.as_markup()
+
+
+def _sub_text(n: int) -> str:
+    kanallar = "kanalga" if n == 1 else "ta kanalga"
+    count = "" if n == 1 else f"{n} "
+    return f"🔒 Botdan foydalanish uchun {count}{kanallar} obuna bo'ling!"
 
 
 class SubscriptionMiddleware(BaseMiddleware):
@@ -32,16 +56,17 @@ class SubscriptionMiddleware(BaseMiddleware):
         tg_user = data.get("event_from_user")
         tg_id = tg_user.id if tg_user else db_user.telegram_id
 
-        # Adminlar tekshirilmaydi
+        # Adminlar o'tadi
         if tg_id in getattr(settings, "ADMIN_IDS", []):
             return await handler(event, data)
 
-        # "sub:check" callback doim o'tishi kerak (check button ishlashi uchun)
-        if isinstance(event, CallbackQuery) and event.data == SUB_CHECK_CB:
-            return await handler(event, data)
+        # Tekshiruv tugmasi va admin callbacklar har doim o'tadi
+        if isinstance(event, CallbackQuery):
+            if event.data == SUB_CHECK_CB or (event.data or "").startswith("adm:"):
+                return await handler(event, data)
 
-        # Admin callback lari o'tadi
-        if isinstance(event, CallbackQuery) and (event.data or "").startswith("adm:"):
+        # Bu sessiyada tekshiruv bosilgan bo'lsa o'tkazib yuborish
+        if tg_id in _PASSED_USERS:
             return await handler(event, data)
 
         bot: Bot = data["bot"]
@@ -50,30 +75,18 @@ class SubscriptionMiddleware(BaseMiddleware):
         if not not_subscribed:
             return await handler(event, data)
 
-        # Obuna qilinmagan kanallar bor
-        b = InlineKeyboardBuilder()
-        for ch in not_subscribed:
-            b.row(InlineKeyboardButton(text=f"📡 {ch.title}", url=ch.link))
-        b.row(InlineKeyboardButton(text="✅ Obuna bo'ldim — Tekshirish", callback_data=SUB_CHECK_CB))
-
-        text = (
-            "🔒 <b>Majburiy obuna</b>\n"
-            "━━━━━━━━━━━━━━━━\n"
-            "Botdan foydalanish uchun quyidagi kanallarga\n"
-            "obuna bo'lishingiz shart:\n\n"
-            + "\n".join(f"📡 <b>{ch.title}</b>" for ch in not_subscribed)
-            + "\n\nObuna bo'lgach <b>✅ Tekshirish</b> tugmasini bosing."
-        )
+        kb = _sub_keyboard(not_subscribed)
+        text = _sub_text(len(not_subscribed))
 
         if isinstance(event, Message):
-            await event.answer(text, parse_mode="HTML", reply_markup=b.as_markup())
+            await event.answer(text, reply_markup=kb)
         elif isinstance(event, CallbackQuery):
             await event.answer("⛔ Avval kanallarga obuna bo'ling!", show_alert=True)
             try:
-                await event.message.answer(text, parse_mode="HTML", reply_markup=b.as_markup())
+                await event.message.answer(text, reply_markup=kb)
             except Exception:
                 pass
-        return  # handler chaqirilmaydi
+        return
 
 
 @sync_to_async
@@ -92,8 +105,14 @@ async def _check_subscriptions(bot: Bot, user_id: int) -> list:
     for ch in channels:
         try:
             member = await bot.get_chat_member(ch.channel_id, user_id)
-            if member.status in ("left", "kicked", "banned"):
+            # Faqat "left" va "kicked" bloklanadi; restricted (join request) o'tadi
+            if member.status in ("left", "kicked"):
                 not_subscribed.append(ch)
         except Exception as e:
-            logger.warning("Kanal tekshirishda xato (id=%s): %s", ch.channel_id, e)
+            # Bot kanalda admin emas yoki kanal topilmadi — bloklamaydi
+            logger.debug("Kanal tekshirib bo'lmadi (id=%s): %s", ch.channel_id, e)
     return not_subscribed
+
+
+def mark_passed(user_id: int) -> None:
+    _PASSED_USERS.add(user_id)
