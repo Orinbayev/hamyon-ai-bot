@@ -20,10 +20,6 @@ from django.conf import settings
 logger = logging.getLogger("bot")
 
 SUB_CHECK_CB = "sub:check"
-
-# Bir sessiyada tekshiruvdan o'tgan foydalanuvchilar (restart bo'lsa tozalanadi)
-_PASSED_USERS: set[int] = set()
-
 NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
 
 
@@ -65,10 +61,6 @@ class SubscriptionMiddleware(BaseMiddleware):
             if event.data == SUB_CHECK_CB or (event.data or "").startswith("adm:"):
                 return await handler(event, data)
 
-        # Bu sessiyada tekshiruv bosilgan bo'lsa o'tkazib yuborish
-        if tg_id in _PASSED_USERS:
-            return await handler(event, data)
-
         bot: Bot = data["bot"]
         not_subscribed = await _check_subscriptions(bot, tg_id)
 
@@ -96,7 +88,13 @@ def _load_active_channels():
 
 
 async def _check_subscriptions(bot: Bot, user_id: int) -> list:
-    """Obuna bo'lmagan kanallar ro'yxatini qaytaradi."""
+    """Obuna bo'lmagan kanallar ro'yxatini qaytaradi.
+
+    Qoidalar:
+    - "left" yoki "kicked" → blok
+    - "restricted" (join request yuborgan, kutmoqda) → o'tkazadi
+    - Exception (bot admin emas, yoki private kanal) → o'tkazadi
+    """
     channels = await _load_active_channels()
     if not channels:
         return []
@@ -105,14 +103,10 @@ async def _check_subscriptions(bot: Bot, user_id: int) -> list:
     for ch in channels:
         try:
             member = await bot.get_chat_member(ch.channel_id, user_id)
-            # Faqat "left" va "kicked" bloklanadi; restricted (join request) o'tadi
             if member.status in ("left", "kicked"):
                 not_subscribed.append(ch)
+            # member, administrator, creator, restricted → o'tadi
         except Exception as e:
-            # Bot kanalda admin emas yoki kanal topilmadi — bloklamaydi
+            # Bot kanalda admin emas yoki kanal tekshirib bo'lmaydi — bloklamaydi
             logger.debug("Kanal tekshirib bo'lmadi (id=%s): %s", ch.channel_id, e)
     return not_subscribed
-
-
-def mark_passed(user_id: int) -> None:
-    _PASSED_USERS.add(user_id)
