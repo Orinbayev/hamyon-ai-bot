@@ -75,12 +75,12 @@ async def cmd_delete(message: Message, db_user: TelegramUser):
 
     if len(args) > 1 and args[1].isdigit():
         tx_id = int(args[1])
-        tx = await Transaction.objects.filter(id=tx_id, user=db_user).afirst()
+        tx = await Transaction.objects.filter(id=tx_id, user=db_user).select_related("category").afirst()
         if not tx:
             await message.answer(f"❌ #{tx_id} ID li yozuv topilmadi.")
             return
     else:
-        tx = await Transaction.objects.filter(user=db_user).order_by("-created_at").afirst()
+        tx = await Transaction.objects.filter(user=db_user).order_by("-created_at").select_related("category").afirst()
         if not tx:
             await message.answer("❌ Hali hech narsa yozilmagan.")
             return

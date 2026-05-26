@@ -2,10 +2,10 @@
 SubscriptionMiddleware — majburiy kanal obunasini tekshiradi.
 
 Flow:
-  1. Foydalanuvchi "1-Kanal" tugmasini bosadi → URL button ko'rinadi
-  2. Foydalanuvchi kanalga o'tib "Zayafka yuborish" tugmasini bosadi
-  3. Bot chat_join_request eventini qabul qiladi → kanal tasdiqlangan deb belgilanadi
-  4. "Tekshirish" bosilganda barcha kanallar tekshiriladi
+  1. Foydalanuvchi "1-Kanal" tugmasini bosadi → URL + "✅ Zayafka yubordim" ko'rinadi
+  2. Foydalanuvchi kanalga o'tib zayafka yuboradi
+  3. "✅ Zayafka yubordim" tugmasini bosadi → kanal tasdiqlangan
+  4. Barcha kanallar tasdiqlangandan keyin "Tekshirish" ishlaydi
 """
 
 import logging
@@ -25,10 +25,11 @@ from django.conf import settings
 
 logger = logging.getLogger("bot")
 
-SUB_CHECK_CB = "sub:check"
-SUB_VISIT_CB = "sub:visit"   # sub:visit:{channel_db_id}
+SUB_CHECK_CB   = "sub:check"
+SUB_VISIT_CB   = "sub:visit"    # sub:visit:{channel_db_id}
+SUB_CONFIRM_CB = "sub:confirm"  # sub:confirm:{channel_db_id}
 
-# Zayafka yuborilgan kanallar: {user_id: {channel_db_id, ...}}
+# Tasdiqlangan kanallar: {user_id: {channel_db_id, ...}}
 _VISITED: dict[int, set[int]] = {}
 
 # 5 daqiqa pass: {user_id: timestamp}
@@ -42,8 +43,8 @@ _SUB_MESSAGES: dict[int, tuple[int, int]] = {}
 def _sub_keyboard(channels: list, visited: set | None = None, open_ch=None) -> Any:
     """
     channels  — barcha aktiv kanallar
-    visited   — zayafka yuborilgan kanal db id'lari (✅ ko'rsatish uchun)
-    open_ch   — URL tugma ko'rsatiladigan kanal
+    visited   — tasdiqlangan kanal db id'lari (✅ ko'rsatish uchun)
+    open_ch   — URL va "Zayafka yubordim" tugmasi ko'rsatiladigan kanal
     """
     b = InlineKeyboardBuilder()
     visited = visited or set()
@@ -53,11 +54,18 @@ def _sub_keyboard(channels: list, visited: set | None = None, open_ch=None) -> A
             text=label,
             callback_data=f"{SUB_VISIT_CB}:{ch.id}",
         ))
-    if open_ch and open_ch.link:
-        b.row(InlineKeyboardButton(
-            text="🔗 Kanalga o'ting ↗",
-            url=open_ch.link,
-        ))
+    if open_ch:
+        if open_ch.link:
+            b.row(InlineKeyboardButton(
+                text="🔗 Kanalga o'ting ↗",
+                url=open_ch.link,
+            ))
+        # "Zayafka yubordim" faqat hali tasdiqlanmagan kanallar uchun
+        if open_ch.id not in visited:
+            b.row(InlineKeyboardButton(
+                text="✅ Zayafka yubordim",
+                callback_data=f"{SUB_CONFIRM_CB}:{open_ch.id}",
+            ))
     b.row(InlineKeyboardButton(text="✅ Tekshirish", callback_data=SUB_CHECK_CB))
     return b.as_markup()
 
@@ -67,7 +75,9 @@ def _sub_text(n: int) -> str:
     count = "" if n == 1 else f"{n} "
     return (
         f"🔒 Botdan foydalanish uchun {count}{kanallar} zayafka yuboring!\n\n"
-        f"Kanal tugmasini bosing → kanalga o'ting → \"Zayafka yuborish\" tugmasini bosing."
+        f"📌 Har bir kanal tugmasini bosing → kanalga o'ting → "
+        f"\"Zayafka yuborish\" tugmasini bosing → "
+        f"\"✅ Zayafka yubordim\" tugmasini bosing."
     )
 
 
@@ -76,7 +86,7 @@ def mark_visited(user_id: int, channel_db_id: int) -> None:
 
 
 def has_visited_all(user_id: int, channels: list) -> bool:
-    """Barcha kanallarga zayafka yuborilganmi?"""
+    """Barcha kanallarga zayafka tasdiqlangan mi?"""
     visited = _VISITED.get(user_id, set())
     return all(ch.id in visited for ch in channels)
 
@@ -103,12 +113,13 @@ class SubscriptionMiddleware(BaseMiddleware):
         if tg_id in getattr(settings, "ADMIN_IDS", []):
             return await handler(event, data)
 
-        # sub:check, sub:visit:*, adm:* — har doim o'tadi
+        # sub:check, sub:visit:*, sub:confirm:*, adm:* — har doim o'tadi
         if isinstance(event, CallbackQuery):
             cd = event.data or ""
             if (
                 cd == SUB_CHECK_CB
                 or cd.startswith(f"{SUB_VISIT_CB}:")
+                or cd.startswith(f"{SUB_CONFIRM_CB}:")
                 or cd.startswith("adm:")
             ):
                 return await handler(event, data)
