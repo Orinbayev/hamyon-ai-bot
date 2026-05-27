@@ -47,6 +47,12 @@ def _fmt_short(amount, currency="UZS") -> str:
     return str(int(n))
 
 
+def voice_retry_keyboard(file_id: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🔄 Qayta urinish", callback_data=f"voice:retry:{file_id}"))
+    return builder.as_markup()
+
+
 def confirm_transactions_keyboard(count: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(

@@ -215,12 +215,11 @@ async def _call_voice(contents, config: types.GenerateContentConfig) -> str:
     """Voice uchun call: 503 bo'lsa 3 marta 4s interval bilan qayta urinadi."""
     models_to_try = [MODEL] + [m for m in VOICE_MODELS if m != MODEL]
 
-    # 3 ta urinish: darhol, 4s kutib, 8s kutib
-    for attempt in range(3):
+    # 2 ta urinish: darhol, 3s kutib (503 qisqa vaqtinchalik bo'lsa yetarli)
+    for attempt in range(2):
         if attempt > 0:
-            wait = attempt * 4
-            logger.info("Voice 503, %ds kutilmoqda (urinish %d/3)...", wait, attempt + 1)
-            await asyncio.sleep(wait)
+            logger.info("Voice 503, 3s kutilmoqda (2-urinish)...")
+            await asyncio.sleep(3)
 
         last_err: Exception | None = None
         for model_name in models_to_try:
@@ -254,6 +253,11 @@ async def _call_voice(contents, config: types.GenerateContentConfig) -> str:
             break  # 503 emas — retry foyda bermaydi
 
     raise last_err or RuntimeError("Barcha voice modellari ishlamadi")
+
+
+def is_503_error(err: Exception) -> bool:
+    msg = str(err)
+    return "503" in msg or "UNAVAILABLE" in msg
 
 
 async def parse_voice(audio_bytes: bytes, mime_type: str = "audio/ogg") -> tuple[list[dict], str]:
