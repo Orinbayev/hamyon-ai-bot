@@ -35,11 +35,10 @@ FALLBACK_MODELS = [
     "gemini-1.5-flash",
 ]
 
-# Audio uchun faqat tasdiqlangan modellar (v1beta da audio qo'llab-quvvatlovchi)
+# Audio uchun faqat tasdiqlangan modellar (yangi API key lar uchun)
 VOICE_MODELS = [
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
+    "gemini-2.5-pro",
 ]
 
 SYSTEM_PROMPT = """
@@ -213,11 +212,17 @@ def _parse_voice_response(raw: str) -> tuple[list[dict], str]:
 
 
 async def _call_voice(contents, config: types.GenerateContentConfig) -> str:
-    """Voice uchun alohida call: faqat audio modellar, 500 uchun retry."""
+    """Voice uchun call: 503 bo'lsa 3 marta 4s interval bilan qayta urinadi."""
     models_to_try = [MODEL] + [m for m in VOICE_MODELS if m != MODEL]
-    last_err: Exception | None = None
 
-    for attempt in range(2):
+    # 3 ta urinish: darhol, 4s kutib, 8s kutib
+    for attempt in range(3):
+        if attempt > 0:
+            wait = attempt * 4
+            logger.info("Voice 503, %ds kutilmoqda (urinish %d/3)...", wait, attempt + 1)
+            await asyncio.sleep(wait)
+
+        last_err: Exception | None = None
         for model_name in models_to_try:
             try:
                 response = await client.aio.models.generate_content(
@@ -235,15 +240,18 @@ async def _call_voice(contents, config: types.GenerateContentConfig) -> str:
                     )
                 return response.text
             except Exception as e:
-                if _is_quota_error(e):
-                    logger.warning("Voice model %s ishlamadi: %s", model_name, str(e)[:60])
+                err_str = str(e)
+                if "503" in err_str or "UNAVAILABLE" in err_str:
+                    logger.warning("Voice model %s: 503 (attempt %d)", model_name, attempt + 1)
+                    last_err = e
+                elif _is_quota_error(e):
+                    logger.warning("Voice model %s ishlamadi: %s", model_name, err_str[:80])
                     last_err = e
                 else:
                     raise
-        # Barcha modellar ishlamadi — 2 soniya kutib qayta urin
-        if attempt == 0:
-            logger.info("Barcha voice modellar ishlamadi, 2s kutib qayta urinilmoqda...")
-            await asyncio.sleep(2)
+
+        if last_err and ("503" not in str(last_err) and "UNAVAILABLE" not in str(last_err)):
+            break  # 503 emas — retry foyda bermaydi
 
     raise last_err or RuntimeError("Barcha voice modellari ishlamadi")
 

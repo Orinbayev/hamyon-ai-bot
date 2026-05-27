@@ -35,13 +35,23 @@ async def handle_voice(message: Message, db_user: TelegramUser, state: FSMContex
         audio_bytes, mime_type = await voice_service.download_voice(message.bot, message.voice)
         items, transcription = await gemini.parse_voice(audio_bytes, mime_type)
     except Exception as e:
+        err_str = str(e)
         logger.exception("Voice processing xatosi: %s", e)
         await thinking_msg.delete()
-        await message.answer(
-            "❌ Ovozni qayta ishlashda xato yuz berdi\n\n"
-            "Iltimos matn orqali yuboring yoki qayta urinib ko'ring.",
-            parse_mode="HTML",
-        )
+        if "503" in err_str or "UNAVAILABLE" in err_str:
+            await message.answer(
+                "⏳ <b>AI server hozir band</b>\n\n"
+                "Bir necha daqiqadan keyin qayta yuboring yoki:\n"
+                "<code>Ovqatga 45 ming</code> — matn orqali yozing.",
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                "❌ Ovozni tahlil qilishda xato\n\n"
+                "Matn orqali yozing:\n"
+                "<code>Ovqatga 45 ming</code>",
+                parse_mode="HTML",
+            )
         return
 
     await thinking_msg.delete()
