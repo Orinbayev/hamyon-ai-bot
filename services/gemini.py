@@ -261,10 +261,32 @@ def is_503_error(err: Exception) -> bool:
 
 
 async def parse_voice(audio_bytes: bytes, mime_type: str = "audio/ogg") -> tuple[list[dict], str]:
-    """Returns (transactions, transcription_text). Works even with noisy/outdoor audio."""
+    """
+    Returns (transactions, transcription_text).
+    Pipeline: Groq Whisper (ishonchli) → Gemini text parser.
+    Fallback: Gemini audio (agar GROQ_API_KEY yo'q bo'lsa).
+    """
+    from django.conf import settings as _settings
+    from services import stt as stt_service
+
+    groq_key = getattr(_settings, "GROQ_API_KEY", "")
+    if groq_key:
+        try:
+            transcription = await stt_service.transcribe(audio_bytes, mime_type)
+            if transcription:
+                logger.info("Groq transcript: %s", transcription[:80])
+                items = await parse_text(transcription)
+                return items, transcription
+            return [], ""
+        except ValueError:
+            pass  # GROQ_API_KEY yo'q — fallbackga o'tish
+        except Exception as e:
+            logger.warning("Groq STT xatosi, Gemini audio ga o'tilmoqda: %s", e)
+
+    # Fallback: Gemini audio (503 bo'lishi mumkin)
     prompt = (
         "Ovozda moliyaviy xabar bor. Shovqin yoki shamol bo'lsa ham eshitilganini yoz.\n"
-        "Javob formati (faqat shu ikki qator):\n"
+        "Javob formati:\n"
         "TRANSCRIPTION: <eshitilgan o'zbek matni>\n"
         "JSON: <tranzaksiyalar array yoki []>"
     )

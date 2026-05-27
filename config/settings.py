@@ -28,6 +28,7 @@ if _render_host and _render_host not in ALLOWED_HOSTS:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 _admin_ids_raw = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS: list[int] = [int(x) for x in _admin_ids_raw.split(",") if x.strip().isdigit()]
