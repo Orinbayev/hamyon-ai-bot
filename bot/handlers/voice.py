@@ -2,6 +2,7 @@
 Ovozli xabarlarni qayta ishlash.
 """
 
+import hashlib
 import logging
 
 from aiogram import F, Router
@@ -17,6 +18,16 @@ logger = logging.getLogger("bot")
 router = Router(name="voice")
 
 VOICE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+# file_id lar callback_data 64-bayt limitiga sig'maydi — xotirada saqlanadi
+_FILE_ID_CACHE: dict[str, str] = {}
+
+
+def _cache_file_id(file_id: str) -> str:
+    """file_id ni 8-belgilik kalit bilan saqlaydi, callbackda ishlatish uchun."""
+    key = hashlib.md5(file_id.encode()).hexdigest()[:8]
+    _FILE_ID_CACHE[key] = file_id
+    return key
 
 
 async def _process_voice(
@@ -34,13 +45,14 @@ async def _process_voice(
         err_str = str(e)
         logger.exception("Voice processing xatosi: %s", e)
         if "503" in err_str or "UNAVAILABLE" in err_str:
+            key = _cache_file_id(file_id)
             await reply_to.answer(
                 "⏳ <b>AI server hozir yuklanib qolgan</b>\n\n"
                 "Bu vaqtinchalik holat. Bir necha daqiqadan keyin:\n"
                 "• Pastdagi tugmani bosing\n"
                 "• Yoki matn orqali yozing: <code>Ovqatga 45 ming</code>",
                 parse_mode="HTML",
-                reply_markup=voice_retry_keyboard(file_id),
+                reply_markup=voice_retry_keyboard(key),
             )
         else:
             await reply_to.answer(
@@ -111,16 +123,19 @@ async def handle_voice(message: Message, db_user: TelegramUser, state: FSMContex
 
 @router.callback_query(F.data.startswith("voice:retry:"))
 async def voice_retry_cb(callback: CallbackQuery, db_user: TelegramUser, state: FSMContext):
-    file_id = callback.data.split(":", 2)[2]
+    key = callback.data.split(":", 2)[2]
+    file_id = _FILE_ID_CACHE.get(key)
+    if not file_id:
+        await callback.answer("⚠️ Sessiya tugagan, ovozni qayta yuboring.", show_alert=True)
+        return
     await callback.answer("🎤 Qayta urinilmoqda...")
     try:
         thinking_msg = await callback.message.answer("🎤 Ovoz qayta tahlil qilinmoqda...")
         file = await callback.bot.get_file(file_id)
         file_bytes = await callback.bot.download_file(file.file_path)
         audio_bytes = file_bytes.read()
-        mime_type = "audio/ogg"
         await thinking_msg.delete()
-        await _process_voice(audio_bytes, mime_type, db_user, file_id, state, callback.message)
+        await _process_voice(audio_bytes, "audio/ogg", db_user, file_id, state, callback.message)
     except Exception as e:
         logger.exception("Voice retry xatosi: %s", e)
         await callback.message.answer(
