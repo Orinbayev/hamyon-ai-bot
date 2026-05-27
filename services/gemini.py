@@ -26,14 +26,13 @@ client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 MODEL = settings.GEMINI_MODEL
 
-# 429/404 xatolarda navbat bilan urinib ko'riladigan modellar
-# (client.models.list() bilan tekshirilgan haqiqiy nomlar)
+# Transient xatolarda navbat bilan urinib ko'riladigan modellar (barcha audio qo'llab-quvvatlaydi)
 FALLBACK_MODELS = [
-    "gemini-2.5-flash",       # 5 RPM, 20 RPD
-    "gemini-3.1-flash-lite",  # 15 RPM, 500 RPD — eng ko'p quota
-    "gemini-3-flash-preview", # 5 RPM, 20 RPD
-    "gemini-2.0-flash-lite",  # backup
-    "gemini-flash-latest",    # alias
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
 ]
 
 SYSTEM_PROMPT = """
@@ -128,8 +127,8 @@ def _parse_items(raw_text: str) -> list[dict]:
 def _is_quota_error(err: Exception) -> bool:
     msg = str(err)
     return any(code in msg for code in (
-        "429", "404", "503",
-        "RESOURCE_EXHAUSTED", "NOT_FOUND", "UNAVAILABLE",
+        "429", "404", "500", "503",
+        "RESOURCE_EXHAUSTED", "NOT_FOUND", "UNAVAILABLE", "INTERNAL",
     ))
 
 
