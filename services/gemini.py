@@ -2,6 +2,7 @@
 Gemini AI service — google-genai SDK, to'liq async, model fallback bilan.
 """
 
+import asyncio
 import json
 import logging
 from datetime import date, timedelta
@@ -26,13 +27,19 @@ client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 MODEL = settings.GEMINI_MODEL
 
-# Transient xatolarda navbat bilan urinib ko'riladigan modellar (barcha audio qo'llab-quvvatlaydi)
+# Matn uchun fallback modellar
 FALLBACK_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
     "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
+]
+
+# Audio uchun faqat tasdiqlangan modellar (v1beta da audio qo'llab-quvvatlovchi)
+VOICE_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
 ]
 
 SYSTEM_PROMPT = """
@@ -205,24 +212,49 @@ def _parse_voice_response(raw: str) -> tuple[list[dict], str]:
     return items, transcription
 
 
+async def _call_voice(contents, config: types.GenerateContentConfig) -> str:
+    """Voice uchun alohida call: faqat audio modellar, 500 uchun retry."""
+    models_to_try = [MODEL] + [m for m in VOICE_MODELS if m != MODEL]
+    last_err: Exception | None = None
+
+    for attempt in range(2):
+        for model_name in models_to_try:
+            try:
+                response = await client.aio.models.generate_content(
+                    model=model_name, contents=contents, config=config,
+                )
+                if model_name != MODEL or attempt > 0:
+                    logger.info("Voice model: %s (attempt %d)", model_name, attempt + 1)
+                meta = getattr(response, "usage_metadata", None)
+                if meta:
+                    tracker.record(
+                        prompt_tokens=getattr(meta, "prompt_token_count", 0) or 0,
+                        response_tokens=getattr(meta, "candidates_token_count", 0) or 0,
+                        total_tokens=getattr(meta, "total_token_count", 0) or 0,
+                        model=model_name,
+                    )
+                return response.text
+            except Exception as e:
+                if _is_quota_error(e):
+                    logger.warning("Voice model %s ishlamadi: %s", model_name, str(e)[:60])
+                    last_err = e
+                else:
+                    raise
+        # Barcha modellar ishlamadi — 2 soniya kutib qayta urin
+        if attempt == 0:
+            logger.info("Barcha voice modellar ishlamadi, 2s kutib qayta urinilmoqda...")
+            await asyncio.sleep(2)
+
+    raise last_err or RuntimeError("Barcha voice modellari ishlamadi")
+
+
 async def parse_voice(audio_bytes: bytes, mime_type: str = "audio/ogg") -> tuple[list[dict], str]:
     """Returns (transactions, transcription_text). Works even with noisy/outdoor audio."""
     prompt = (
-        "Ovozli xabar ko'cha, shamol yoki shovqinli muhitda yozilgan bo'lishi mumkin.\n\n"
-        "Quyidagi ketma-ketlikda ish qil:\n"
-        "1. Ovozni o'zbek tiliga transkripsiya qil. Shovqin bo'lsa ham eshitilgan "
-        "so'zlardan ma'noni tiklashga harakat qil. Sonlar (45, ming, million) va "
-        "moliyaviy so'zlar (so'm, dollar, taxi, ovqat, karta, payme, click) "
-        "alohida e'tibor bilan eshit. Noaniq so'zni kontekstdan chiqar.\n"
-        "2. Transkripsiyadan moliyaviy tranzaksiyalarni ajrat.\n\n"
-        "Javobni AYNAN shu formatda yoz (boshqa narsa yozma):\n"
-        "TRANSCRIPTION: <eshitilgan matn, to'liq>\n"
-        "JSON: <tranzaksiyalar JSON array>\n\n"
-        "Misol:\n"
-        "TRANSCRIPTION: taksiga o'n besh ming to'ladim\n"
-        "JSON: [{\"type\":\"expense\",\"amount\":15000,\"currency\":\"UZS\","
-        "\"category\":\"taxi\",\"payment_method\":\"cash\",\"date\":\"today\",\"note\":\"taxi\"}]\n\n"
-        "Tranzaksiya topilmasa: JSON: []"
+        "Ovozda moliyaviy xabar bor. Shovqin yoki shamol bo'lsa ham eshitilganini yoz.\n"
+        "Javob formati (faqat shu ikki qator):\n"
+        "TRANSCRIPTION: <eshitilgan o'zbek matni>\n"
+        "JSON: <tranzaksiyalar array yoki []>"
     )
     contents = [
         types.Part(inline_data=types.Blob(data=audio_bytes, mime_type=mime_type)),
@@ -233,7 +265,7 @@ async def parse_voice(audio_bytes: bytes, mime_type: str = "audio/ogg") -> tuple
         temperature=0.25,
     )
     try:
-        raw = await _call(contents, config)
+        raw = await _call_voice(contents, config)
         return _parse_voice_response(raw)
     except Exception as e:
         logger.exception("Gemini voice xatosi: %s", e)
