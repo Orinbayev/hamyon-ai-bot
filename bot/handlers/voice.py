@@ -33,7 +33,7 @@ async def handle_voice(message: Message, db_user: TelegramUser, state: FSMContex
 
     try:
         audio_bytes, mime_type = await voice_service.download_voice(message.bot, message.voice)
-        items = await gemini.parse_voice(audio_bytes, mime_type)
+        items, transcription = await gemini.parse_voice(audio_bytes, mime_type)
     except Exception as e:
         logger.exception("Voice processing xatosi: %s", e)
         await thinking_msg.delete()
@@ -47,12 +47,22 @@ async def handle_voice(message: Message, db_user: TelegramUser, state: FSMContex
     await thinking_msg.delete()
 
     if not items:
-        await message.answer(
-            "⚠️ Ovozda moliyaviy ma'lumot topilmadi\n\n"
-            "Aniqroq ayting, masalan:\n"
-            "<i>\"Ovqatga qirq besh ming so'm ketdi\"</i>",
-            parse_mode="HTML",
-        )
+        if transcription:
+            await message.answer(
+                f"⚠️ <b>Tranzaksiya topilmadi</b>\n\n"
+                f"Men shunday eshitdim:\n"
+                f"<i>«{transcription}»</i>\n\n"
+                f"Agar noto'g'ri bo'lsa, matn orqali yozing:\n"
+                f"<code>Ovqatga 45 ming</code>",
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                "⚠️ <b>Ovoz tushunilmadi</b>\n\n"
+                "Shovqin juda kuchli bo'lishi mumkin. Matn orqali yozing:\n"
+                "<code>Ovqatga 45 ming</code>",
+                parse_mode="HTML",
+            )
         return
 
     raw_text = f"[voice] {message.voice.file_id}"

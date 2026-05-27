@@ -6,6 +6,14 @@ import json
 import logging
 from datetime import date, timedelta
 
+# aiohttp 3.9.x da ClientConnectorDNSError yo'q — google-genai SDK bug workaround
+try:
+    import aiohttp as _aiohttp
+    if not hasattr(_aiohttp, "ClientConnectorDNSError"):
+        _aiohttp.ClientConnectorDNSError = _aiohttp.ClientConnectorError
+except Exception:
+    pass
+
 from google import genai
 from google.genai import types
 from django.conf import settings
@@ -119,7 +127,10 @@ def _parse_items(raw_text: str) -> list[dict]:
 
 def _is_quota_error(err: Exception) -> bool:
     msg = str(err)
-    return any(code in msg for code in ("429", "404", "RESOURCE_EXHAUSTED", "NOT_FOUND"))
+    return any(code in msg for code in (
+        "429", "404", "503",
+        "RESOURCE_EXHAUSTED", "NOT_FOUND", "UNAVAILABLE",
+    ))
 
 
 async def _call(contents, config: types.GenerateContentConfig) -> str:
@@ -171,10 +182,48 @@ async def parse_text(text: str) -> list[dict]:
         raise
 
 
-async def parse_voice(audio_bytes: bytes, mime_type: str = "audio/ogg") -> list[dict]:
+def _parse_voice_response(raw: str) -> tuple[list[dict], str]:
+    """Parse structured voice response: TRANSCRIPTION: ... JSON: [...]"""
+    transcription = ""
+    json_text = raw
+
+    if "TRANSCRIPTION:" in raw:
+        parts = raw.split("TRANSCRIPTION:", 1)[1]
+        if "JSON:" in parts:
+            transcription = parts.split("JSON:")[0].strip()
+            json_text = parts.split("JSON:", 1)[1].strip()
+        else:
+            transcription = parts.strip()
+            json_text = "[]"
+    elif "JSON:" in raw:
+        json_text = raw.split("JSON:", 1)[1].strip()
+
+    try:
+        items = _parse_items(json_text)
+    except (json.JSONDecodeError, Exception):
+        items = []
+
+    return items, transcription
+
+
+async def parse_voice(audio_bytes: bytes, mime_type: str = "audio/ogg") -> tuple[list[dict], str]:
+    """Returns (transactions, transcription_text). Works even with noisy/outdoor audio."""
     prompt = (
-        "Quyidagi ovozli xabarda moliyaviy tranzaksiyalar bor. "
-        "Avval o'zbek tiliga transkripsiya qil, keyin tranzaksiyalarni JSON formatida qaytarr."
+        "Ovozli xabar ko'cha, shamol yoki shovqinli muhitda yozilgan bo'lishi mumkin.\n\n"
+        "Quyidagi ketma-ketlikda ish qil:\n"
+        "1. Ovozni o'zbek tiliga transkripsiya qil. Shovqin bo'lsa ham eshitilgan "
+        "so'zlardan ma'noni tiklashga harakat qil. Sonlar (45, ming, million) va "
+        "moliyaviy so'zlar (so'm, dollar, taxi, ovqat, karta, payme, click) "
+        "alohida e'tibor bilan eshit. Noaniq so'zni kontekstdan chiqar.\n"
+        "2. Transkripsiyadan moliyaviy tranzaksiyalarni ajrat.\n\n"
+        "Javobni AYNAN shu formatda yoz (boshqa narsa yozma):\n"
+        "TRANSCRIPTION: <eshitilgan matn, to'liq>\n"
+        "JSON: <tranzaksiyalar JSON array>\n\n"
+        "Misol:\n"
+        "TRANSCRIPTION: taksiga o'n besh ming to'ladim\n"
+        "JSON: [{\"type\":\"expense\",\"amount\":15000,\"currency\":\"UZS\","
+        "\"category\":\"taxi\",\"payment_method\":\"cash\",\"date\":\"today\",\"note\":\"taxi\"}]\n\n"
+        "Tranzaksiya topilmasa: JSON: []"
     )
     contents = [
         types.Part(inline_data=types.Blob(data=audio_bytes, mime_type=mime_type)),
@@ -182,14 +231,11 @@ async def parse_voice(audio_bytes: bytes, mime_type: str = "audio/ogg") -> list[
     ]
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_PROMPT,
-        temperature=0.1,
+        temperature=0.25,
     )
     try:
         raw = await _call(contents, config)
-        return _parse_items(raw)
-    except json.JSONDecodeError as e:
-        logger.error("Voice JSON parse xatosi: %s", e)
-        return []
+        return _parse_voice_response(raw)
     except Exception as e:
         logger.exception("Gemini voice xatosi: %s", e)
         raise
