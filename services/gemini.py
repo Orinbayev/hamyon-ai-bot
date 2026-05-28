@@ -275,7 +275,21 @@ async def parse_voice(audio_bytes: bytes, mime_type: str = "audio/ogg") -> tuple
             transcription = await stt_service.transcribe(audio_bytes, mime_type)
             if transcription:
                 logger.info("Groq transcript: %s", transcription[:80])
-                items = await parse_text(transcription)
+                # Turkcha/o'zbek aralash bo'lishi mumkin — Gemini ga kontekst beramiz
+                config = types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.1,
+                )
+                voice_note = (
+                    "Quyidagi matn ovozdan transkripsiya qilingan (o'zbek tili, "
+                    "ba'zi turkcha so'zlar aralash bo'lishi mumkin — ularni ham "
+                    "o'zbek moliyaviy atamasi sifatida qabul qil):\n"
+                )
+                try:
+                    raw = await _call(voice_note + transcription, config)
+                    items = _parse_items(raw)
+                except (json.JSONDecodeError, Exception):
+                    items = []
                 return items, transcription
             return [], ""
         except ValueError:

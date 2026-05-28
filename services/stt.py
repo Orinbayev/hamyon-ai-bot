@@ -29,8 +29,13 @@ async def transcribe(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
     form.add_field("model", GROQ_MODEL)
     form.add_field("language", "uz")
     form.add_field("response_format", "text")
-    # Moliyaviy so'zlar uchun hint — Whisper sifatini oshiradi
-    form.add_field("prompt", "so'm, ming, million, taxi, ovqat, kirim, chiqim, karta, naqd")
+    # Kuchli o'zbek moliyaviy lug'at — Whisper turkcha o'rniga o'zbek chiqaradi
+    form.add_field("prompt",
+        "O'zbekcha moliyaviy xabar: to'ladim, oldim, berdim, sarfladim, ketdi, tushdi, "
+        "so'm, ming, million, dollar, rubl, taxi, taksi, ovqat, restoran, kafe, "
+        "kiyim, internet, telefon, kommunal, oqish, salomatlik, kino, maosh, qarz, "
+        "naqd, karta, Payme, Click, harajat, kirim, chiqim, balans"
+    )
 
     async with aiohttp.ClientSession() as session:
         async with session.post(

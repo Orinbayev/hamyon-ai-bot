@@ -10,8 +10,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from apps.users.models import TelegramUser
-from bot.handlers.message import SEP, _build_preview, _build_success_reply, _save_transactions, _LAST_TX
-from bot.keyboards.inline import confirm_transactions_keyboard, tx_quick_actions_keyboard, voice_retry_keyboard
+from bot.handlers.message import _build_success_reply, _save_transactions, _LAST_TX
+from bot.keyboards.inline import voice_retry_keyboard
 from services import gemini, voice as voice_service
 
 logger = logging.getLogger("bot")
@@ -85,25 +85,14 @@ async def _process_voice(
 
     raw_text = f"[voice] {file_id}"
 
-    if len(items) == 1:
-        saved = await _save_transactions(db_user, items, raw_text)
-        if saved:
-            _LAST_TX[db_user.telegram_id] = [tx.id for tx in saved]
-        reply = await _build_success_reply(db_user, items, saved)
-        kb = tx_quick_actions_keyboard(saved[0].id) if saved else None
-        await reply_to.answer(reply, parse_mode="HTML", reply_markup=kb)
-        return
-
-    preview = _build_preview(items)
-    await state.update_data(pending_items=items, raw_text=raw_text)
-    await reply_to.answer(
-        f"🎤 <b>Ovozdan {len(items)} ta tranzaksiya topildi:</b>\n\n"
-        f"{preview}\n\n"
-        f"{SEP}\n"
-        "Hammasini saqlashni tasdiqlaysizmi?",
-        parse_mode="HTML",
-        reply_markup=confirm_transactions_keyboard(len(items)),
-    )
+    # Ovozda topilgan BARCHA tranzaksiyalar avtomatik saqlanadi (confirm so'ralmaydi)
+    saved = await _save_transactions(db_user, items, raw_text)
+    if saved:
+        _LAST_TX[db_user.telegram_id] = [tx.id for tx in saved]
+    reply = await _build_success_reply(db_user, items, saved)
+    # Kategoriya tugmasi ko'rsatilmaydi — foydalanuvchi ixtiyoriy ravishda
+    # Tarix > tranzaksiyani ochib o'zgartirishi mumkin
+    await reply_to.answer(reply, parse_mode="HTML")
 
 
 @router.message(F.voice)
